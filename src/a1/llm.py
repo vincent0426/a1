@@ -1,0 +1,388 @@
+"""
+LLM tool implementation with multi-provider support.
+
+Handles different function calling formats across providers:
+- OpenAI: function_call/function_call_output with tool_calls array
+- Anthropic: tool_use/tool_result with stop_reason
+- Google: functionCall/functionResponse with parts
+- Groq: Same as OpenAI (uses OpenAI-compatible API)
+
+Provides unified interface via any-llm SDK.
+"""
+
+import json
+import logging
+from typing import Any, Dict, List, Optional
+from pydantic import BaseModel, Field, ConfigDict, SkipValidation
+
+from .models import Tool
+
+logger = logging.getLogger(__name__)
+
+# Import any_llm at module level for easier mocking in tests
+try:
+    from any_llm import acompletion  # Use async version
+except ImportError:
+    acompletion = None  # Will be set in tests or when any_llm is installed
+
+
+def no_context():
+    """Create a throwaway context list that won't be used."""
+    from .context import Context
+    return Context()
+
+
+class LLMInput(BaseModel):
+    """Input for LLM tool."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
+    content: str = Field(..., description="Input prompt or query")
+    tools: Optional[SkipValidation[List[Tool]]] = Field(default=None, description="Tools available for function calling")
+    context: Optional[SkipValidation[Any]] = Field(default=None, description="Context object for message history tracking")
+    output_schema: Optional[SkipValidation[type[BaseModel]]] = Field(default=None, description="Optional schema to structure the output")
+
+
+class LLMOutput(BaseModel):
+    """Output from LLM tool."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
+    content: str = Field(..., description="Text response from LLM")
+    tools_called: Optional[SkipValidation[List[Tool]]] = Field(default=None, description="Tools that were called by LLM")
+
+
+def _tool_to_openai_schema(tool: Tool) -> Optional[Dict[str, Any]]:
+    """
+    Convert a1 Tool to OpenAI function schema.
+    
+    Returns None if the tool can't be serialized (e.g., LLM tools that have Tool objects in their schema).
+    Uses cleaned tool name in the schema to avoid Harmony format tokens.
+    """
+    try:
+        # Get JSON schema from Pydantic model
+        schema = tool.input_schema.model_json_schema()
+        
+        # Clean the tool name to remove Harmony special tokens before sending to API
+        clean_name = _clean_tool_name(tool.name)
+        
+        return {
+            "type": "function",
+            "function": {
+                "name": clean_name,
+                "description": tool.description,
+                "parameters": schema
+            }
+        }
+    except Exception as e:
+        # Skip tools that can't be serialized (like LLM tools with Tool objects in their schema)
+        logger.debug(f"Skipping tool {tool.name} - can't generate JSON schema: {e}")
+        return None
+
+
+def _clean_tool_name(name: str) -> str:
+    """
+    Clean tool name by removing Harmony format special tokens.
+    
+    The gpt-oss models use Harmony format with special tokens like <|channel|>commentary.
+    Some providers may include these in the tool name, so we strip them out.
+    """
+    # Remove common Harmony special tokens that might appear in tool names
+    # Examples: "done<|channel|>commentary" -> "done"
+    special_tokens = [
+        '<|channel|>commentary',
+        '<|channel|>analysis', 
+        '<|channel|>final',
+        '<|constrain|>json',
+        '<|call|>',
+        '<|return|>',
+        '<|end|>',
+        '<|start|>',
+        '<|message|>',
+    ]
+    
+    cleaned = name
+    for token in special_tokens:
+        cleaned = cleaned.replace(token, '')
+    
+    # Remove any remaining <|...> patterns
+    import re
+    cleaned = re.sub(r'<\|[^|]+\|>', '', cleaned)
+    
+    return cleaned.strip()
+
+
+def _extract_base_tool_name(name: str) -> str:
+    """
+    Extract the base tool name by removing all special tokens and markers.
+    
+    This is more aggressive than _clean_tool_name - it removes everything
+    that looks like a Harmony token or special marker.
+    
+    Examples:
+    - "done<|channel|>commentary" -> "done"
+    - "calculator<|end|>" -> "calculator"
+    - "llm_groq_openai_gpt_oss_20b" -> "llm_groq_openai_gpt_oss_20b"
+    """
+    import re
+    # First do the standard cleaning
+    cleaned = _clean_tool_name(name)
+    # Remove any trailing underscores that might have been left
+    cleaned = cleaned.strip('_')
+    return cleaned
+
+
+def _infer_provider(model: str) -> str:
+    """Infer the provider from the model name."""
+    if model.startswith("gpt"):
+        return "openai"
+    elif model.startswith("claude"):
+        return "anthropic"
+    elif model.startswith("gemini"):
+        return "gemini"  # Changed from "google" to "gemini"
+    elif model.startswith("llama"):
+        return "groq"
+    else:
+        return "openai"  # Default to OpenAI
+
+
+def LLM(model: str, input_schema: Optional[type[BaseModel]] = None, output_schema: Optional[type[BaseModel]] = None) -> Tool:
+    """
+    Create an LLM tool that can call language models with function calling support.
+    
+    Handles different function calling formats across providers:
+    - OpenAI: tool_calls array with function objects
+    - Anthropic: content blocks with tool_use type
+    - Google: function_call in parts
+    - Groq: OpenAI-compatible format
+    
+    Args:
+        model: Model string with optional provider prefix (e.g., "gpt-4.1", "groq:llama-4", "claude-haiku-4-5")
+        input_schema: Optional Pydantic model for structured input
+        output_schema: Optional Pydantic model for structured output
+    
+    Returns:
+        Tool that calls the LLM with function calling and history tracking
+    """
+    
+    async def execute(
+        content: str,
+        tools: Optional[List[Tool]] = None,
+        context: Optional[Any] = None,
+        output_schema: Optional[type[BaseModel]] = None
+    ):
+        """
+        Execute LLM call with optional function calling support.
+        
+        If tools are provided but none are terminal, automatically adds a Done tool.
+        If output_schema is provided, returns an instance of that schema.
+        
+        Args:
+            content: The prompt/query to send to the LLM
+            tools: Optional list of tools available for function calling
+            context: Optional Context object for message history tracking
+            output_schema: Optional schema to structure the output (overrides default)
+        
+        Returns:
+            If output_schema provided: instance of that schema
+            If terminal tool called: LLMOutput with result as content
+            If tools were called: LLMOutput with content and tools_called list
+            If no tools: just the string content
+        """
+        from .context import Context
+        
+        # Use the override output_schema or fall back to the one set during LLM creation
+        target_output_schema = output_schema
+        
+        # Use provided context or create throwaway
+        if context is None:
+            context = no_context()
+        
+        # Auto-add Done tool if tools provided but none are terminal
+        if tools:
+            has_terminal = any(t.is_terminal for t in tools)
+            if not has_terminal:
+                from .builtin_tools import Done
+                # Add Done tool with the target output schema if provided
+                tools = tools + [Done(output_schema=target_output_schema)]
+        
+        # Add user message to context
+        context.user(content)
+        
+        # Prepare messages for API call
+        messages = context.to_dict_list()
+        
+        # Convert tools to OpenAI function calling format (any-llm uses this format)
+        # Filter out None values (tools that couldn't be serialized, like LLM tools)
+        api_tools = None
+        if tools:
+            schemas = [_tool_to_openai_schema(tool) for tool in tools]
+            api_tools = [s for s in schemas if s is not None]
+            # If no tools could be serialized, set to None
+            if not api_tools:
+                api_tools = None
+        
+        # Parse provider from model string if it contains ":"
+        if ":" in model:
+            provider, model_name = model.split(":", 1)
+        else:
+            # Try to infer provider from model name
+            provider = _infer_provider(model)
+            model_name = model
+        
+        logger.info(f"Calling {provider}:{model_name} with {len(messages)} messages")
+        
+        # Call LLM via any-llm (async version)
+        # If tools are provided, set tool_choice to "auto" to allow the model to decide
+        call_params = {
+            "model": model_name,
+            "provider": provider,
+            "messages": messages,
+        }
+        
+        if api_tools:
+            call_params["tools"] = api_tools
+            call_params["tool_choice"] = "auto"  # Allow model to decide whether to call tools
+        
+        # Call LLM with retry logic for tool validation errors
+        max_retries = 2
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                response = await acompletion(**call_params)
+                break  # Success
+            except Exception as e:
+                # Check if this is a tool validation error from the model
+                error_msg = str(e)
+                if "tool call validation failed" in error_msg and "done<|channel|>" in error_msg:
+                    logger.warning(f"Attempt {attempt+1}: Model generated invalid tool name with Harmony tokens")
+                    last_error = e
+                    # Retry by removing tool_choice constraint - let the model try again
+                    if attempt < max_retries - 1:
+                        call_params.pop("tool_choice", None)
+                        logger.info("Retrying without tool_choice constraint")
+                        continue
+                # Re-raise if it's a different error or we've exhausted retries
+                raise
+        
+        # Extract response - any-llm normalizes to OpenAI format
+        message = response.choices[0].message
+        response_content = message.content or ""
+        tool_calls = getattr(message, 'tool_calls', None)
+        
+        # Add assistant message to context
+        tool_call_dicts = None
+        if tool_calls:
+            tool_call_dicts = [
+                {
+                    "id": tc.id,
+                    "type": tc.type,
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments
+                    }
+                } for tc in tool_calls
+            ]
+        context.assistant(response_content, tool_calls=tool_call_dicts)
+        
+        # If there are tool calls, execute them and track which tools were called
+        tools_called_list = []
+        if tool_calls and tools:
+            logger.info(f"Executing {len(tool_calls)} tool calls")
+            
+            for tool_call in tool_calls:
+                # Clean the function name to remove Harmony special tokens
+                func_name = _clean_tool_name(tool_call.function.name)
+                base_name = _extract_base_tool_name(func_name)
+                func_args = json.loads(tool_call.function.arguments)
+                
+                # Find and execute tool - try multiple matching strategies:
+                # 1. Exact match on cleaned name
+                # 2. Match on original tool name
+                # 3. Match on base name extracted from the tool call
+                tool = next((t for t in tools if 
+                    t.name == func_name or 
+                    t.name == base_name or
+                    _clean_tool_name(t.name) == func_name or
+                    _extract_base_tool_name(t.name) == base_name
+                ), None)
+                if tool:
+                    try:
+                        logger.info(f"Calling tool: {func_name}({func_args})")
+                        result = await tool(**func_args)
+                        
+                        # Add tool result to context
+                        context.tool(
+                            content=json.dumps(result) if isinstance(result, dict) else str(result),
+                            name=func_name,
+                            tool_call_id=tool_call.id
+                        )
+                        logger.info(f"Tool {func_name} result: {result}")
+                        
+                        # Track the tool that was called
+                        tools_called_list.append(tool)
+                        
+                        # If this is a terminal tool, return the result directly
+                        # (it should already be the target output schema if one was specified)
+                        if tool.is_terminal:
+                            # If result is already the target schema, return it directly
+                            if target_output_schema and isinstance(result, target_output_schema):
+                                return result
+                            # Otherwise convert to appropriate format
+                            elif target_output_schema and target_output_schema != LLMOutput:
+                                # Try to construct target schema from result
+                                if isinstance(result, dict):
+                                    return target_output_schema(**result)
+                                else:
+                                    # Wrap in first field of target schema
+                                    field_name = list(target_output_schema.model_fields.keys())[0]
+                                    return target_output_schema(**{field_name: result})
+                            else:
+                                # Default behavior - return LLMOutput with content
+                                if hasattr(result, 'model_dump'):
+                                    result_dict = result.model_dump()
+                                    result_content = str(list(result_dict.values())[0]) if result_dict else str(result)
+                                elif isinstance(result, dict):
+                                    result_content = str(list(result.values())[0]) if result else str(result)
+                                else:
+                                    result_content = str(result)
+                                
+                                return LLMOutput(
+                                    content=result_content,
+                                    tools_called=tools_called_list
+                                )
+                    except Exception as e:
+                        logger.error(f"Error executing {func_name}: {e}")
+                        # Add error to context
+                        context.tool(
+                            content=f"Error executing {func_name}: {str(e)}",
+                            name=func_name,
+                            tool_call_id=tool_call.id
+                        )
+                else:
+                    logger.warning(f"Tool {func_name} not found in available tools")
+        
+        # Return based on whether tools were called
+        if tools_called_list:
+            return LLMOutput(
+                content=response_content,
+                tools_called=tools_called_list
+            )
+        else:
+            # Simple case - just return the content string
+            return response_content
+    
+    return Tool(
+        name=f"llm_{model.replace(':', '_').replace('-', '_').replace('/', '_')}",
+        description=f"Call {model} language model with function calling support",
+        input_schema=input_schema or LLMInput,
+        output_schema=output_schema or LLMOutput,
+        execute=execute,
+        is_terminal=False
+    )
+
+
+__all__ = [
+    "LLM",
+    "LLMInput",
+    "LLMOutput",
+    "no_context",
+]

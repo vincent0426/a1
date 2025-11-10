@@ -1,0 +1,135 @@
+"""
+a1 - A modern agent compiler for building and executing LLM-powered agents.
+
+This library provides:
+- Agent, Tool, ToolSet: Core abstractions for defining agents
+- Runtime: Execution environment with AOT/JIT compilation
+- Built-in tools: LLM, Done
+- RAG toolsets: FileSystemRAG, SQLRAG
+- Strategies: Generate, Verify, Cost, Compact
+- Observability: OpenTelemetry integration
+
+Quick Start:
+    from a1 import Agent, tool, LLM, Done, Runtime
+    
+    @tool(name="add", description="Add two numbers")
+    async def add(a: int, b: int) -> int:
+        return a + b
+    
+    agent = Agent(
+        name="math_agent",
+        description="Solves math problems",
+        input_schema=MathInput,
+        output_schema=MathOutput,
+        tools=[add, LLM("gpt-4"), Done()]
+    )
+    
+    # AOT compilation
+    runtime = Runtime()
+    compiled = await runtime.aot(agent)
+    result = await compiled(problem="What is 2 + 2?")
+    
+    # JIT execution
+    result = await runtime.jit(agent, "What is 2 + 2?")
+"""
+
+from .models import Agent, Tool, ToolSet, tool, Message, Strategy
+from .builtin_tools import LLM, Done
+from .llm import LLMInput, LLMOutput, no_context
+from .runtime import Runtime, get_runtime, set_runtime, get_context
+from .context import Context, no_history, Compact, BaseCompact
+from .executor import Executor, BaseExecutor, CodeOutput
+from .strategies import (
+    Generate, BaseGenerate,
+    Verify, BaseVerify, QualitativeCriteria, IsLoop,
+    Cost, BaseCost, QuantitativeCriteria
+)
+from .rag import FileSystemRAG, SQLRAG
+
+__version__ = "0.1.0"
+
+__all__ = [
+    # Core models
+    "Agent",
+    "Tool",
+    "ToolSet",
+    "tool",
+    "Message",
+    "Strategy",
+    
+    # Built-in tools
+    "LLM",
+    "LLMInput",
+    "LLMOutput",
+    "no_context",
+    "Done",
+    
+    # Runtime
+    "Runtime",
+    "get_runtime",
+    "set_runtime",
+    "get_context",
+    
+    # Context management
+    "Context",
+    "no_history",
+    "Compact",
+    "BaseCompact",
+    
+    # Execution
+    "Executor",
+    "BaseExecutor",
+    "CodeOutput",
+    
+    # Strategies
+    "Generate",
+    "BaseGenerate",
+    "Verify",
+    "BaseVerify",
+    "QualitativeCriteria",
+    "IsLoop",
+    "Cost",
+    "BaseCost",
+    "QuantitativeCriteria",
+    
+    # RAG
+    "FileSystemRAG",
+    "SQLRAG",
+    
+    # Version
+    "__version__",
+]
+
+
+# Convenience wrappers for top-level usage
+# These use the global runtime
+
+async def aot(agent: Agent, cache: bool = True) -> Tool:
+    """
+    Compile an agent ahead-of-time using the global runtime.
+    
+    Equivalent to: get_runtime().aot(agent, cache)
+    """
+    return await get_runtime().aot(agent, cache)
+
+
+async def jit(agent: Agent, input_data: any) -> any:
+    """
+    Execute an agent just-in-time using the global runtime.
+    
+    Equivalent to: get_runtime().jit(agent, input_data)
+    """
+    return await get_runtime().jit(agent, input_data)
+
+
+async def execute(tool: Tool, input_data: any) -> any:
+    """
+    Execute a tool using the global runtime.
+    
+    Equivalent to: get_runtime().execute(tool, input_data)
+    """
+    return await get_runtime().execute(tool, input_data)
+
+
+# Add to __all__
+__all__.extend(["aot", "jit", "execute"])
