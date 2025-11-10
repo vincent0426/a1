@@ -1,8 +1,8 @@
 <div align="center">
-  <img src="docs/assets/blast_icon_only.png" width="200" height="200" alt="BLAST Logo">
+  <img src="docs/assets/blast_icon_only.sketchpad.png" width="200" height="200" alt="BLAST Logo">
 </div>
 
-<p align="center" style="font-size: 24px">The a1 compiler for safe, reliable, deterministic AI agents.</p>
+<p align="center" style="font-size: 24px">The agent <i>compiler</i> framework</p>
 
 <div align="center">
 
@@ -12,19 +12,26 @@
 
 </div>
 
-a1 is an agent compiler. It takes an `Agent` (set of tools and a description) and compiles either AOT (ahead-of-time) into a `Tool` or JIT (just-in-time) for immediate execution tuned to the agent input.
+A1 is a new kind of agent framework. It takes an `Agent` (a set of tools and a description) and compiles either AOT (ahead-of-time) into a `Tool` or JIT (just-in-time) for immediate execution optimized for each unique agent input.
 
 ```bash
 uv pip install a1-compiler
+# or
+pip install a1-compiler
 ```
 
 ## 🏎️ Why use an agent compiler?
 
-* **Safety** a1 generates code for every agent input and isolates LLM contexts as much as possible, reducing the amount of potentially untrusted data an LLM is exposed to. 
-* **Speed** a1 makes codegen practical for agents with aggressive parallelism and static checking.
-* **Determinism** a1 optimizes for determinism via a swappable cost function.
+An agent compiler is a direct replacement for agent frameworks such as Langchain or aisdk, where you define an `Agent` and run. The diference is:
 
-Agent compilers emerged from frustration with agent frameworks where every agent runs a static while loop program. Slow, unsafe, and highly nondeterministic. An agent compiler can perform the same while loop (just set `Verify=IsLoop()`) but has the freedom to explore superoptimal execution plans, while subject to engineered constraints.
+* **Safety:** A1 generates code for each unique agent input, optimizing constantly to shrink the prompt injection attack surface. 
+* **Speed:** A1 makes codegen practical for tool-wielding agents with aggressive parallelism and static checking.
+* **Determinism:** A1 optimizes for determinism via an engineered cost function. For example, it may replace an LLM call with a fast RegEx but may revert on-the-fly if a tool's schema evolves.
+* **Flexibility** A tool in A1 can be instantly constructed from an OpenAPI document, an MCP server, a DB connection string, an fsspec path, a Python function, a Python package, or even just a documentation website URL.
+
+Agent compilers emerged from frustration with the MCP protocol and SOTA agent frameworks where every agent runs a static while loop program. Slow, unsafe, and highly nondeterministic. 
+
+An agent compiler can perform the same while loop (just set `Verify=IsLoop()`) but has the freedom to explore superoptimal execution plans, while subject to engineered constraints (e.g. type-safety).
 
 ## 🚀 How to get started?
 
@@ -48,9 +55,9 @@ class MathOutput(BaseModel):
 agent = Agent(
     name="math_agent",
     description="Solves simple math problems",
-    input_schema=MathInput,
+    input_schema=MathInput, # like DSPy modules, A1 agent behavior is specified via schemas. The difference is that in A1, an engineer may implement a Verify function to enforce agent-specific constraints such as order of tool calling.
     output_schema=MathOutput,
-    tools=[add, LLM(model="gpt-4o")],  # LLMs are tools!
+    tools=[add, LLM(model="gpt-4o")],  # in A1, LLMs are tools!
 )
 
 async def main():
@@ -67,17 +74,14 @@ import asyncio
 asyncio.run(main())
 ```
 
-See the `tests/` directory for extensive examples of everything a1 can do. Docs coming soon to [docs.a1project.org](https://docs.a1project.org)
+See the `tests/` directory for extensive examples of everything A1 can do. Docs coming soon to [docs.a1project.org](https://docs.a1project.org)
 
 ## ✨ Features
 
-* **Import** your Langchain agents
+* **Import** any Langchain agent
 * **Observability** via OpenTelemetry
-* **Tools** instantiated from MCP, OpenAPI, or FastAPI servers
+* **Tools** instantiated from MCP or OpenAPI
 * **RAG** instantiated given any SQL database or fsspec path (e.g. `s3://my-place/here`, `gs://...`, or local filesystem)
-  * Unified `RAG` router that automatically switches between file and database operations
-  * `FileSystemRAG` for file operations (ls, grep, cat) using fsspec
-  * `SQLRAG` for database queries using SQLAlchemy with pandas
 * **Skills** defined manually or by crawling online docs
 * **Context engineering** via a simple API that lets compiled code manage multi-agent behavior
 * **Zero lock-in** use any LLM, any secure code execution cloud
@@ -90,3 +94,7 @@ Awesome! See our [Contributing Guide](/CONTRIBUTING.md) for details.
 ## 📄 MIT License
 
 As it should be!
+
+## 📜 Citation
+
+Paper coming soon! Reach out if you'd like to contribute.
