@@ -395,22 +395,40 @@ If an error is reported, fix the previously generated code accordingly.
             # Generate Pydantic model for output if schema exists  
             if hasattr(tool, 'output_schema') and tool.output_schema:
                 try:
-                    # First, extract and add any nested Pydantic models from output schema
-                    self._add_nested_pydantic_models(tool.output_schema, lines)
+                    # Check if this is a wrapped primitive type (created by @tool decorator)
+                    # If output_schema.__name__ ends with "Output" and has only a "result" field,
+                    # it's likely a wrapped primitive
+                    is_wrapped_primitive = False
+                    if (hasattr(tool.output_schema, '__name__') and 
+                        'output' in tool.output_schema.__name__.lower() and
+                        hasattr(tool.output_schema, 'model_fields')):
+                        fields = list(tool.output_schema.model_fields.keys())
+                        if fields == ['result']:
+                            # This is a wrapped primitive - extract the actual type
+                            result_field = tool.output_schema.model_fields['result']
+                            if hasattr(result_field.annotation, '__name__'):
+                                output_model_name = result_field.annotation.__name__
+                            else:
+                                output_model_name = str(result_field.annotation)
+                            is_wrapped_primitive = True
                     
-                    if hasattr(tool.output_schema, 'model_json_schema'):
-                        schema = tool.output_schema.model_json_schema()
-                        output_model_name = tool.output_schema.__name__
-                    elif isinstance(tool.output_schema, dict):
-                        schema = tool.output_schema
-                    else:
-                        schema = None
-                    
-                    if schema and schema.get("properties"):
-                        if not output_model_name:
-                            output_model_name = f"{tool.name.title().replace('_', '')}Output"
-                        # Use recursive function to handle nested schemas
-                        generate_nested_pydantic_classes(schema, output_model_name, lines)
+                    if not is_wrapped_primitive:
+                        # First, extract and add any nested Pydantic models from output schema
+                        self._add_nested_pydantic_models(tool.output_schema, lines)
+                        
+                        if hasattr(tool.output_schema, 'model_json_schema'):
+                            schema = tool.output_schema.model_json_schema()
+                            output_model_name = tool.output_schema.__name__
+                        elif isinstance(tool.output_schema, dict):
+                            schema = tool.output_schema
+                        else:
+                            schema = None
+                        
+                        if schema and schema.get("properties"):
+                            if not output_model_name:
+                                output_model_name = f"{tool.name.title().replace('_', '')}Output"
+                            # Use recursive function to handle nested schemas
+                            generate_nested_pydantic_classes(schema, output_model_name, lines)
                 except Exception as e:
                     # Skip this tool's output schema but continue to show the function
                     logger.debug(f"Could not generate output schema for {tool.name}: {e}")

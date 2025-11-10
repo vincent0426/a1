@@ -56,7 +56,7 @@ from .serialization import (
 )
 import a1.code_utils as code_utils
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     # Core models

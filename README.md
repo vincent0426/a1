@@ -14,22 +14,22 @@
 
 a1 is an agent compiler. It takes an `Agent` (set of tools and a description) and compiles either AOT (ahead-of-time) into a `Tool` or JIT (just-in-time) for immediate execution tuned to the agent input.
 
-```
-pip install a1
+```bash
+uv pip install a1-compiler
 ```
 
 ## 🏎️ Why use an agent compiler?
 
-* **Safety.** a1 generates code for every input task, reducing the attack surface for AI agents significantly.
-* **Speed.** a1 makes codegen practical for agents with aggressive parallelism and static checking.
-* **Determinism.** a1 optimizes for maximal determinism via a customizable cost function.
+* **Safety** a1 generates code for every agent input and isolates LLM contexts as much as possible, reducing the amount of potentially untrusted data an LLM is exposed to. 
+* **Speed** a1 makes codegen practical for agents with aggressive parallelism and static checking.
+* **Determinism** a1 optimizes for determinism via a swappable cost function.
 
-Agent compilers emerged from frustration with agent frameworks where every agent runs a static while loop program. An agent compiler can do the same (just set `Verify=IsLoop()`) but has the freedom to optimize.
+Agent compilers emerged from frustration with agent frameworks where every agent runs a static while loop program. Slow, unsafe, and highly nondeterministic. An agent compiler can perform the same while loop (just set `Verify=IsLoop()`) but has the freedom to explore superoptimal execution plans, while subject to engineered constraints.
 
 ## 🚀 How to get started?
 
 ```python
-from a1 import Agent, tool, LLM, Done, Runtime
+from a1 import Agent, tool, LLM
 from pydantic import BaseModel
 
 # Define a simple tool
@@ -42,27 +42,26 @@ class MathInput(BaseModel):
     problem: str
 
 class MathOutput(BaseModel):
-    answer: str
+    answer: int
 
-# Create an agent
+# Create an agent with tools and LLM
 agent = Agent(
     name="math_agent",
     description="Solves simple math problems",
     input_schema=MathInput,
     output_schema=MathOutput,
-    tools=[add, LLM("gpt-4.1")],
+    tools=[add, LLM(model="gpt-4o")],  # LLMs are tools!
 )
 
-# Use the agent with AOT compilation
 async def main():
     # Compile ahead-of-time
     compiled = await agent.aot()
-    result = await compiled(problem="What is 2 + 2?")
-    print(result)
+    result = await compiled.execute(problem="What is 2 + 2?")
+    print(f"AOT result: {result}")
 
     # Or execute just-in-time
-    result = await runtime.jit(agent, problem="What is 5 + 3?")
-    print(result)
+    result = await agent.jit(problem="What is 5 + 3?")
+    print(f"JIT result: {result}")
 
 import asyncio
 asyncio.run(main())
@@ -72,18 +71,21 @@ See the `tests/` directory for extensive examples of everything a1 can do. Docs 
 
 ## ✨ Features
 
-* Import your Langchain agents
-* Observability via OpenTelemetry
-* Tools - instantiate from MCP or OpenAPI
-* RAG - load from any SQL database, any fsspec path (e.g. `s3://my-place/here` or `somewhere/local`).
-* Skills - define manually or crawl online docs.
-* Context engineering - compile multi-agent systems that manage multiple contexts.
-* Zero lock-in - use any LLM, any secure code execution cloud.
-* Only gets better as researchers develop increasingly powerful methods to `Generate`, `Cost` estimate, and `Verify` agent code.
+* **Import** your Langchain agents
+* **Observability** via OpenTelemetry
+* **Tools** instantiated from MCP, OpenAPI, or FastAPI servers
+* **RAG** instantiated given any SQL database or fsspec path (e.g. `s3://my-place/here`, `gs://...`, or local filesystem)
+  * Unified `RAG` router that automatically switches between file and database operations
+  * `FileSystemRAG` for file operations (ls, grep, cat) using fsspec
+  * `SQLRAG` for database queries using SQLAlchemy with pandas
+* **Skills** defined manually or by crawling online docs
+* **Context engineering** via a simple API that lets compiled code manage multi-agent behavior
+* **Zero lock-in** use any LLM, any secure code execution cloud
+* Only gets better as researchers develop increasingly powerful methods to `Generate`, `Cost` estimate, and `Verify` agent code
 
 ## 🤝 Contributing
 
-Awesome! See our [Contributing Guide](https://docs.blastproject.org/development/contributing) for details.
+Awesome! See our [Contributing Guide](/CONTRIBUTING.md) for details.
 
 ## 📄 MIT License
 
