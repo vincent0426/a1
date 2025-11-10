@@ -14,6 +14,38 @@ from .code_utils import generate_nested_pydantic_classes
 logger = logging.getLogger(__name__)
 
 
+def generate_tool_names(tools: List[Any]) -> Dict[str, str]:
+    """
+    Generate LLM-friendly tool names (llm_a, llm_b, ..., llm_z, llm_aa, etc.).
+    
+    Maps original tool names to short variable names.
+    
+    Args:
+        tools: List of Tool objects
+        
+    Returns:
+        Dict mapping original tool name -> generated short name
+    """
+    name_map = {}
+    counter = 0
+    
+    for tool in tools:
+        if "llm" in tool.name.lower():
+            # Generate name: a, b, ..., z, aa, ab, ...
+            if counter < 26:
+                short_name = chr(ord('a') + counter)
+            else:
+                # For aa, ab, ac, ..., ba, bb, ...
+                first = chr(ord('a') + (counter - 26) // 26)
+                second = chr(ord('a') + (counter - 26) % 26)
+                short_name = first + second
+            
+            name_map[tool.name] = f"llm_{short_name}"
+            counter += 1
+    
+    return name_map
+
+
 # Example code showing realistic patterns
 EXAMPLE_CODE = """
 E1: immediate return
@@ -220,6 +252,25 @@ If an error is reported, fix the previously generated code accordingly.
         lines.append("from typing import Optional, List, Dict, Any, Union, Literal")
         lines.append("")
         
+        # Add skill module imports
+        # NOTE: In future, this can be made smarter to selectively load only relevant skills
+        # based on the task at hand, rather than loading all skill modules
+        if hasattr(agent, 'skills') and agent.skills:
+            skill_modules = set()
+            for skill_or_skillset in agent.skills:
+                if hasattr(skill_or_skillset, 'skills'):
+                    # It's a SkillSet
+                    for skill in skill_or_skillset.skills:
+                        skill_modules.update(skill.modules)
+                else:
+                    # It's a Skill
+                    skill_modules.update(skill_or_skillset.modules)
+            
+            for module in sorted(skill_modules):
+                lines.append(f"import {module}")
+            if skill_modules:
+                lines.append("")
+        
         # Add Context stub so LLM can reference it
         lines.append("class Context:")
         lines.append('    """Context object for tracking message history."""')
@@ -270,6 +321,39 @@ If an error is reported, fix the previously generated code accordingly.
                     else:
                         lines.append(f'    {field_name}: Optional[{field_type}] = Field(None, description="{desc}")')
                 lines.append("")
+        
+        # Add skill content to definition code
+        # NOTE: In future, this can be made smarter to selectively load only relevant skills
+        # based on task context, rather than loading all skills
+        if hasattr(agent, 'skills') and agent.skills:
+            lines.append("# ============================================================================")
+            lines.append("# AVAILABLE SKILLS AND KNOWLEDGE")
+            lines.append("# ============================================================================")
+            lines.append("")
+            
+            def add_skills(skills_list):
+                """Recursively add skill content from skills and skillsets."""
+                for skill_or_skillset in skills_list:
+                    if hasattr(skill_or_skillset, 'skills'):
+                        # It's a SkillSet - recurse into it
+                        lines.append(f"# SkillSet: {skill_or_skillset.name}")
+                        lines.append(f"# {skill_or_skillset.description}")
+                        lines.append("")
+                        add_skills(skill_or_skillset.skills)
+                    else:
+                        # It's a Skill - add its content
+                        lines.append(f"# Skill: {skill_or_skillset.name}")
+                        lines.append(f"# {skill_or_skillset.description}")
+                        lines.append(f"# Modules: {', '.join(skill_or_skillset.modules)}")
+                        lines.append("# Content:")
+                        # Indent the skill content
+                        for content_line in skill_or_skillset.content.split('\n'):
+                            lines.append(f"# {content_line}")
+                        lines.append("")
+            
+            add_skills(agent.skills)
+            lines.append("# ============================================================================")
+            lines.append("")
         
         # Add tool definitions - all available tools and their schemas (non-LLM tools first)
         for tool in agent.get_all_tools():
@@ -386,6 +470,17 @@ If an error is reported, fix the previously generated code accordingly.
         lines.append("CTX: Dict[str, Context] = {'main': Context()}")
         lines.append("")
         
+        # Generate LLM tool naming map and add to definition
+        llm_tools = [t for t in agent.get_all_tools() if "llm" in t.name.lower()]
+        if llm_tools:
+            tool_name_map = generate_tool_names(llm_tools)
+            lines.append("# ============================================================================")
+            lines.append("# LLM TOOL NAMING MAP")
+            lines.append("# ============================================================================")
+            for original_name, short_name in tool_name_map.items():
+                lines.append(f"# {original_name} -> {short_name}")
+            lines.append("")
+        
         # Add LLM tools (simplified signatures)
         for tool in agent.get_all_tools():
             if "llm" in tool.name.lower():
@@ -408,7 +503,7 @@ If an error is reported, fix the previously generated code accordingly.
         # For JIT (code blocks), end with TASK and code section
         if not return_function:
             lines.append("")
-            lines.append(f"# TASK: {agent.description}")
+            lines.append(f"# YOUR TASK IS: {agent.description}")
             lines.append("")
             lines.append("# YOUR CODE HERE")
         else:

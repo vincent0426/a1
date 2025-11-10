@@ -198,7 +198,7 @@ def SQLRAG(
     
     Args:
         connection: SQLAlchemy connection string or pandas DataFrame
-        schema: Optional schema name
+        schema: Optional schema name (for DataFrames, becomes the table name)
     
     Returns:
         ToolSet with sql query tool (readonly)
@@ -207,12 +207,12 @@ def SQLRAG(
     import pandas as pd
     
     # Handle DataFrame input
+    table_name = None  # Track table name for DataFrames
     if isinstance(connection, pd.DataFrame):
         # Create in-memory SQLite database
         engine = create_engine("sqlite:///:memory:")
         table_name = schema or "data"
         connection.to_sql(table_name, engine, index=False)
-        schema = None  # SQLite doesn't use schemas
     else:
         # Use connection string
         engine = create_engine(connection)

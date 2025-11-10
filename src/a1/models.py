@@ -192,16 +192,21 @@ def tool(
 
 class ToolSet(BaseModel):
     """
-    A collection of related tools.
+    A collection of related tools and/or ToolSets.
     
     Attributes:
         name: Unique identifier for the toolset
         description: Human-readable description
-        tools: List of tools in this set
+        tools: List of tools and/or nested ToolSets
+    
+    Note: Using List[Union[Tool, ToolSet]] allows ToolSet to define a tree structure
+    of tools, enabling more advanced Generate implementations to selectively load
+    different tools based on the task at hand. This hierarchical organization supports
+    dynamic tool selection strategies.
     """
     name: str
     description: str
-    tools: List[Tool]
+    tools: List[Union[Tool, "ToolSet"]]
     
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
@@ -263,9 +268,171 @@ class ToolSet(BaseModel):
         )
 
 
+class Skill(BaseModel):
+    """
+    A reusable skill/knowledge unit with code and module dependencies.
+    
+    Skills encapsulate domain-specific knowledge, patterns, and best practices
+    that can be selectively loaded into agents. Each skill includes content
+    (code snippets, examples, instructions) and specifies required Python modules.
+    
+    Attributes:
+        name: Unique identifier for the skill
+        description: Human-readable description of what this skill provides
+        content: The actual skill content (code, examples, documentation, instructions)
+        modules: List of Python module names that this skill depends on
+    """
+    name: str
+    description: str
+    content: str
+    modules: List[str] = Field(default_factory=list, description="Python modules required for this skill")
+    
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
+    @classmethod
+    async def from_url(
+        cls,
+        urls: Union[str, List[str]],
+        name: str,
+        description: str,
+        chunk_size: int = 2000,
+        llm: Optional[Any] = None,
+        instructions: Optional[str] = None,
+        modules: Optional[List[str]] = None
+    ) -> "Skill":
+        """
+        Load skill content from one or more URLs using crawl4ai and LLM summarization.
+        
+        Uses crawl4ai to fetch and parse content from URLs, chunks the content,
+        and uses an LLM to generate a concise skill summary and extract relevant
+        Python modules. This enables creating skills from web documentation,
+        articles, tutorials, and other online resources.
+        
+        Args:
+            urls: Single URL or list of URLs to load content from
+            name: Name for the generated skill
+            description: Description of what the skill provides
+            chunk_size: Size of content chunks for LLM processing (default: 2000 chars)
+            llm: Optional LLM tool to use for summarization (uses default if not provided)
+            instructions: Optional specific instructions for skill generation
+            modules: Optional list of Python modules (auto-detected if not provided)
+        
+        Returns:
+            Skill with content from the URLs
+        
+        Raises:
+            ImportError: If crawl4ai is not installed
+            ValueError: If URL loading fails
+        
+        Note:
+            Requires: pip install crawl4ai
+            The LLM used for summarization should be fast/cheap (e.g., gpt-3.5-turbo)
+        """
+        try:
+            from crawl4ai import AsyncWebCrawler
+        except ImportError:
+            raise ImportError(
+                "crawl4ai is required for Skill.from_url. "
+                "Install it with: pip install crawl4ai"
+            )
+        
+        # Normalize urls to list
+        if isinstance(urls, str):
+            urls = [urls]
+        
+        # Use default LLM if not provided
+        if llm is None:
+            from .builtin_tools import LLM
+            llm = LLM("gpt-4o-mini")
+        
+        # Fetch content from URLs using crawl4ai
+        crawler = AsyncWebCrawler()
+        all_content = []
+        
+        for url in urls:
+            try:
+                result = await crawler.arun(url)
+                if result.success:
+                    all_content.append(f"# From: {url}\n{result.markdown}")
+                else:
+                    raise ValueError(f"Failed to crawl {url}: {result.error}")
+            except Exception as e:
+                raise ValueError(f"Error crawling {url}: {str(e)}")
+        
+        full_content = "\n\n".join(all_content)
+        
+        # Chunk content for LLM processing
+        chunks = [
+            full_content[i:i+chunk_size]
+            for i in range(0, len(full_content), chunk_size)
+        ]
+        
+        # Use LLM to generate skill content
+        summarization_prompt = f"""
+Given the following content from URL(s), create a concise skill summary that:
+1. Captures the key concepts and best practices
+2. Provides practical examples or code snippets
+3. Is organized and easy to reference
+4. Lists any Python modules that would be needed (if applicable)
+
+Content to summarize:
+{full_content[:5000]}  # Use first 5000 chars to save tokens
+
+{f"Additional instructions: {instructions}" if instructions else ""}
+
+Format the response as a markdown skill guide.
+"""
+        
+        # Get LLM response (assuming llm is a Tool)
+        summary_response = await llm(content=summarization_prompt)
+        
+        # Extract content from response
+        if hasattr(summary_response, 'content'):
+            skill_content = summary_response.content
+        else:
+            skill_content = str(summary_response)
+        
+        # Auto-detect modules if not provided
+        detected_modules = modules or []
+        if not modules:
+            # Simple heuristic: look for common module names in content
+            common_modules = ['pandas', 'numpy', 'requests', 'beautifulsoup4', 'sqlalchemy', 
+                            'flask', 'django', 'sklearn', 'pytorch', 'tensorflow', 
+                            'matplotlib', 'seaborn', 'plotly', 'asyncio', 'aiohttp']
+            for module in common_modules:
+                if module.lower() in full_content.lower():
+                    detected_modules.append(module)
+        
+        return cls(
+            name=name,
+            description=description,
+            content=skill_content,
+            modules=detected_modules
+        )
+
+
+class SkillSet(BaseModel):
+    """
+    A collection of related skills.
+    
+    SkillSets group multiple skills together for organizational purposes,
+    allowing agents to have access to collections of domain-specific knowledge.
+    
+    Attributes:
+        name: Unique identifier for the skillset
+        description: Human-readable description of the skillset
+        skills: List of skills in this collection
+    """
+    name: str
+    description: str
+    skills: List[Skill]
+    
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+
 class Agent(BaseModel):
     """
-    An agent is a composition of tools with defined behavior.
+    An agent is a composition of tools, skills, and defined behavior.
     
     Attributes:
         name: Unique identifier for the agent (default: "agent")
@@ -273,12 +440,14 @@ class Agent(BaseModel):
         input_schema: Pydantic model for agent input (default: str wrapped in Input model)
         output_schema: Pydantic model for agent output (default: str wrapped in Output model)
         tools: List of tools or toolsets available to the agent
+        skills: List of skills or skillsets available to the agent
     """
     name: str = "agent"
     description: str = ""
     input_schema: type[BaseModel] = Field(default_factory=lambda: create_model("Input", input=(str, ...)))
     output_schema: type[BaseModel] = Field(default_factory=lambda: create_model("Output", output=(str, ...)))
     tools: List[Union[Tool, ToolSet]] = Field(default_factory=list)
+    skills: List[Union[Skill, SkillSet]] = Field(default_factory=list)
     
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
@@ -299,7 +468,32 @@ class Agent(BaseModel):
                 return tool
         return None
     
-    async def aot(self, cache: bool = True) -> Tool:
+    def save_to_file(self, path: Union[str, "Path"]) -> None:
+        """
+        Save this agent to a JSON file.
+        
+        Args:
+            path: File path to save to
+        """
+        from pathlib import Path
+        from .serialization import save_agent_to_file
+        save_agent_to_file(self, path)
+    
+    @classmethod
+    def load_from_file(cls, path: Union[str, "Path"]) -> "Agent":
+        """
+        Load an agent from a JSON file.
+        
+        Args:
+            path: File path to load from
+            
+        Returns:
+            Loaded Agent
+        """
+        from .serialization import load_agent_from_file
+        return load_agent_from_file(path)
+    
+    async def aot(self, cache: bool = True, strategy: Optional["Strategy"] = None) -> Tool:
         """
         Ahead-of-time compile this agent to a tool.
         
@@ -308,22 +502,34 @@ class Agent(BaseModel):
         
         Args:
             cache: Whether to use cached compilation (default: True)
+            strategy: Optional Strategy for generation config (default: Strategy())
         
         Returns:
             Tool that executes the compiled agent
         """
         from .runtime import get_runtime
         runtime = get_runtime()
-        return await runtime.aot(self, cache=cache)
+        return await runtime.aot(self, cache=cache, strategy=strategy)
     
-    async def jit(self, **kwargs) -> Any:
+    async def jit(self, strategy: Optional["Strategy"] = None, **kwargs) -> Any:
         """
         Just-in-time execute this agent.
         
         Uses the global runtime to execute the agent. This is a thin wrapper
         around Runtime.jit() for convenience.
         
+        Supports ergonomic string input: if the agent's input schema has exactly
+        one string field, pass it as keyword argument with the field name, or
+        use any kwarg name and it will be auto-mapped to the string field.
+        
+        Example:
+            # With single string field 'query' in input schema
+            result = await agent.jit(query="What is 2+2?")
+            # Or with auto-mapping:
+            result = await agent.jit(text="What is 2+2?")
+        
         Args:
+            strategy: Optional Strategy for generation config (default: Strategy())
             **kwargs: Input arguments matching this agent's input_schema
         
         Returns:
@@ -331,7 +537,7 @@ class Agent(BaseModel):
         """
         from .runtime import get_runtime
         runtime = get_runtime()
-        return await runtime.jit(self, **kwargs)
+        return await runtime.jit(self, strategy=strategy, **kwargs)
     
     @classmethod
     def from_langchain(cls, langchain_agent: Any) -> "Agent":
@@ -425,5 +631,7 @@ __all__ = [
     "Tool",
     "tool",
     "ToolSet",
+    "Skill",
+    "SkillSet",
     "Agent",
 ]

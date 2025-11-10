@@ -286,8 +286,31 @@ class Runtime:
         from opentelemetry import trace
         import asyncio
         
-        # Validate input against agent's input schema
-        validated_input = agent.input_schema(**kwargs)
+        # Handle auto-conversion of string input
+        # If kwargs contains a single string value and the agent's input schema
+        # has exactly one string field, this is likely the intended input
+        if not kwargs:
+            # No kwargs provided - this is okay, will fail validation if required
+            validated_input = agent.input_schema()
+        elif len(kwargs) == 1 and len(agent.input_schema.model_fields) == 1:
+            # Single kwarg and single input field - auto-map even without name match
+            field_name = list(agent.input_schema.model_fields.keys())[0]
+            kwarg_key = list(kwargs.keys())[0]
+            kwarg_value = kwargs[kwarg_key]
+            
+            # Auto-convert by field name match or type compatibility
+            if kwarg_key == field_name:
+                # Exact field name match
+                validated_input = agent.input_schema(**kwargs)
+            elif isinstance(kwarg_value, str):
+                # String value and single string field - auto-map
+                validated_input = agent.input_schema(**{field_name: kwarg_value})
+            else:
+                # Type mismatch - try normal validation
+                validated_input = agent.input_schema(**kwargs)
+        else:
+            # Multiple kwargs or multiple fields - use normal validation
+            validated_input = agent.input_schema(**kwargs)
         input_dict = validated_input.model_dump()
         
         # Use default strategy if not provided

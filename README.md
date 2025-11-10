@@ -1,3 +1,17 @@
+<div align="center">
+  <img src="docs/assets/blast_icon_only.png" width="200" height="200" alt="BLAST Logo">
+</div>
+
+<p align="center" style="font-size: 24px">The a1 compiler for safe, reliable, deterministic AI agents.</p>
+
+<div align="center">
+
+[![Documentation](https://img.shields.io/badge/Docs-FFE067)](https://docs.a1project.org)
+[![Discord](https://img.shields.io/badge/Discord-FFE067)](https://discord.gg/NqrkJwYYh4)
+[![Twitter Follow](https://img.shields.io/twitter/follow/realcalebwin?style=social)](https://x.com/realcalebwin)
+
+</div>
+
 # a1
 
 **A modern agent compiler for building and executing LLM-powered agents**
