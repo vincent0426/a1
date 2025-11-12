@@ -8,6 +8,8 @@ Provides:
 """
 
 from typing import Dict, List, Optional
+from pathlib import Path
+import json
 from .models import Message
 
 
@@ -17,18 +19,79 @@ class Context:
     
     Contexts track the conversation history for an agent execution,
     including user messages, assistant responses, and tool calls.
+    
+    Supports persistence with auto-update via `from_file(path, keep_updated=True)`.
     """
     
-    def __init__(self, messages: Optional[List[Message]] = None):
+    def __init__(
+        self, 
+        messages: Optional[List[Message]] = None,
+        file_path: Optional[Path] = None,
+        keep_updated: bool = False
+    ):
         self.messages: List[Message] = messages or []
+        self.file_path = file_path
+        self.keep_updated = keep_updated
+        self._runtime_save = None  # Callback for runtime persistence
+        
+        if self.keep_updated and self.file_path:
+            self._save()
+    
+    def _save(self):
+        """Save context to file if persistence is enabled."""
+        # If linked to a runtime, use its save method
+        if self._runtime_save is not None:
+            self._runtime_save()
+        # Otherwise save this context independently
+        elif self.file_path:
+            # Use mode='json' to properly serialize datetime objects
+            data = [msg.model_dump(exclude_none=True, mode='json') for msg in self.messages]
+            self.file_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.file_path, "w") as f:
+                json.dump(data, f, indent=2)
+    
+    @classmethod
+    def from_file(cls, path: str, keep_updated: bool = False) -> "Context":
+        """
+        Load context from a file, optionally enabling auto-save on changes.
+        
+        Args:
+            path: Path to JSON file containing messages
+            keep_updated: If True, auto-save context on every change
+        
+        Returns:
+            Context instance with loaded messages
+        
+        Example:
+            >>> ctx = Context.from_file("conversation.json", keep_updated=True)
+            >>> ctx.user("Hello")  # Automatically saved to file
+        """
+        file_path = Path(path)
+        
+        if file_path.exists():
+            with open(file_path) as f:
+                messages_data = json.load(f)
+                messages = [Message(**msg) for msg in messages_data]
+        else:
+            messages = []
+        
+        return cls(
+            messages=messages,
+            file_path=file_path,
+            keep_updated=keep_updated
+        )
     
     def append(self, message: Message):
         """Add a message to the context."""
         self.messages.append(message)
+        if self.keep_updated:
+            self._save()
     
     def extend(self, messages: List[Message]):
         """Add multiple messages to the context."""
         self.messages.extend(messages)
+        if self.keep_updated:
+            self._save()
     
     def user(self, content: str):
         """Add a user message."""
@@ -49,6 +112,8 @@ class Context:
     def clear(self):
         """Clear all messages."""
         self.messages.clear()
+        if self.keep_updated:
+            self._save()
     
     def __len__(self) -> int:
         return len(self.messages)
@@ -61,7 +126,9 @@ class Context:
     
     def to_dict_list(self) -> List[Dict]:
         """Convert to list of dicts for API calls."""
-        return [msg.model_dump(exclude_none=True) for msg in self.messages]
+        # Use mode='json' to properly serialize datetime and other non-JSON types
+        # Exclude timestamp and message_id as they're for internal tracking only
+        return [msg.model_dump(exclude_none=True, mode='json', exclude={'timestamp', 'message_id'}) for msg in self.messages]
 
 
 def no_history() -> Context:

@@ -28,7 +28,7 @@ result = f"Result: {x}"
 """
         is_valid, error = verifier.verify(code)
         assert not is_valid
-        assert "No async function definition found" in error
+        assert "No async function implementation found" in error
     
     def test_multiple_functions(self):
         """Test multiple functions fail."""

@@ -1,0 +1,725 @@
+# Code Generation Strategies
+
+A1's code generation pipeline can be fully customized through the **Strategy** system. You can control:
+
+- **Generate**: How code is created from task descriptions
+- **Verify**: What validation criteria code must meet
+- **Cost**: How code quality/efficiency is scored
+- **Compact**: How code is optimized (future)
+- **Execute**: Custom execution environments (future)
+
+## Strategy Class
+
+The `Strategy` class extends `RetryStrategy` to configure the complete code generation pipeline.
+
+### Basic Usage
+
+```python
+from a1 import Strategy, Agent, Runtime
+
+# Default strategy (3 retries, 3 parallel candidates)
+strategy = Strategy(
+    max_iterations=3,      # Retry up to 3 times if verification fails
+    num_candidates=3       # Generate 3 parallel candidates
+)
+
+agent = Agent(
+    output_schema=int,
+    strategy=strategy
+)
+
+runtime = Runtime()
+result = runtime.jit(agent, "Calculate fibonacci of 10")
+```
+
+### Advanced Configuration
+
+```python
+from a1 import Strategy, QualitativeCriteria, QuantitativeCriteria, LLM, IsFunction
+
+evaluator = LLM("gpt-4o-mini")
+scorer = LLM("gpt-4o-mini")
+
+strategy = Strategy(
+    # Retry configuration (inherited from RetryStrategy)
+    max_iterations=5,           # Max refinement iterations per candidate
+    num_candidates=3,           # Parallel candidates to generate
+    
+    # Verification
+    verify=QualitativeCriteria(
+        expression="Code is correct and handles edge cases",
+        llm=evaluator
+    ),
+    
+    # Cost-based selection
+    cost=QuantitativeCriteria(
+        expression="How complex is this code? (0=simple, 10=complex)",
+        llm=scorer,
+        min=0, max=10
+    ),
+    
+    # Early stopping
+    min_candidates_for_comparison=2,   # Start comparing when 2 candidates are valid
+    accept_cost_threshold=2.0,         # Immediately accept if cost < 2.0
+    compare_cost_threshold=5.0         # Compare early if 2 candidates < 5.0
+)
+
+agent = Agent(
+    output_schema=dict,
+    strategy=strategy
+)
+```
+
+### Strategy Parameters
+
+#### From RetryStrategy
+
+- **max_iterations** (int, default=3): Maximum refinement iterations per candidate
+  - If verification fails, retry generation up to this many times
+  - Each iteration uses feedback from previous failures
+
+- **num_candidates** (int, default=3): Number of parallel candidates to generate
+  - Generates multiple solutions concurrently
+  - Best candidate (by cost) is selected
+  - Higher values increase success rate but cost more
+
+#### Strategy-Specific
+
+- **min_candidates_for_comparison** (int, default=1): Minimum valid candidates before comparing
+  - Wait for at least this many candidates to pass verification
+  - Enables early stopping when enough good candidates are ready
+
+- **accept_cost_threshold** (float, optional): Immediately accept if cost below this value
+  - Short-circuits comparison when a very good candidate is found
+  - Example: `accept_cost_threshold=2.0` → accept first candidate with cost < 2.0
+
+- **compare_cost_threshold** (float, optional): Compare early when candidates below this cost
+  - Start comparison when `min_candidates_for_comparison` candidates are below this threshold
+  - Example: `compare_cost_threshold=5.0, min_candidates_for_comparison=2` → compare when 2 candidates have cost < 5.0
+
+- **generate** (Generate, optional): Custom code generation strategy (default: None, uses runtime's)
+- **verify** (Verify or list, optional): Custom verification strategy or list (default: None, uses runtime's)
+- **cost** (Cost, optional): Custom cost estimation strategy (default: None, uses runtime's)
+- **compact** (Compact, optional): Custom code compaction strategy (default: None, uses runtime's)
+
+### Where to Configure Strategy
+
+Strategy can be set at multiple levels, with more specific settings overriding defaults:
+
+```python
+from a1 import Strategy, Runtime, set_strategy, get_runtime
+
+# 1. Runtime constructor - applies to all operations
+runtime = Runtime(strategy=Strategy(max_iterations=5, num_candidates=3))
+
+# 2. Global runtime - affects current get_runtime()
+set_strategy(Strategy(max_iterations=10, num_candidates=5))
+
+# 3. Per-call override in aot()
+compiled = await runtime.aot(agent, strategy=Strategy(num_candidates=1))
+
+# 4. Per-call override in jit()
+result = await runtime.jit(agent, strategy=Strategy(num_candidates=10), input="test")
+```
+
+**Priority order** (highest to lowest):
+1. Call-level strategy (`aot(strategy=...)` or `jit(strategy=...)`)
+2. Runtime strategy (`Runtime(strategy=...)`)
+3. Global strategy (`set_strategy(...)`)
+4. Default strategy (`Strategy()` with defaults)
+
+## Generation Pipeline
+
+The Strategy orchestrates a multi-stage pipeline:
+
+```
+1. GENERATE (parallel)
+   ├─> Candidate 1 ──┐
+   ├─> Candidate 2 ──┼─> 2. VERIFY (each)
+   └─> Candidate 3 ──┘
+                       │
+                       ├─> Pass? ──> 3. COST (valid candidates)
+                       └─> Fail? ──> Retry (if iterations remain)
+                                       │
+                                       └─> 4. SELECT (lowest cost)
+                                             │
+                                             └─> 5. EXECUTE
+```
+
+### Example Workflow
+
+```python
+# Strategy configuration
+strategy = Strategy(
+    max_iterations=3,
+    num_candidates=3,
+    verify=is_valid,
+    cost=complexity
+)
+
+# Execution flow:
+# 1. Generate 3 candidates in parallel
+# 2. Verify each candidate:
+#    - Candidate 1: PASS ✓ → cost = 4.5
+#    - Candidate 2: FAIL ✗ → retry (iteration 1/3)
+#    - Candidate 3: PASS ✓ → cost = 6.2
+# 3. Select lowest cost: Candidate 1 (4.5 < 6.2)
+# 4. Execute Candidate 1
+```
+
+## Customizing Generate
+
+Control **how code is created** from task descriptions.
+
+### BaseGenerate
+
+Default LLM-based code generation:
+
+```python
+from a1 import BaseGenerate, LLM
+
+# Custom generator with specific LLM
+class MyGenerate(BaseGenerate):
+    def __init__(self):
+        self.llm = LLM("gpt-4o")  # Use specific model
+        
+    async def generate(
+        self, 
+        agent, 
+        task, 
+        return_function=False,
+        past_attempts=None
+    ):
+        # Call parent implementation
+        definition_code, generated_code = await super().generate(
+            agent, task, return_function, past_attempts
+        )
+        
+        # Optional: post-process generated code
+        generated_code = self.optimize(generated_code)
+        
+        return (definition_code, generated_code)
+    
+    def optimize(self, code):
+        # Custom optimization logic
+        return code
+```
+
+### Template-Based Generation
+
+Generate code from templates:
+
+```python
+class TemplateGenerate(BaseGenerate):
+    def __init__(self, templates):
+        self.templates = templates  # Dict of task patterns -> code templates
+    
+    async def generate(self, agent, task, return_function=False, past_attempts=None):
+        # Match task to template
+        for pattern, template in self.templates.items():
+            if pattern in task.lower():
+                # Fill template
+                code = template.format(task=task)
+                return ("", code)
+        
+        # Fallback to LLM generation
+        return await super().generate(agent, task, return_function, past_attempts)
+
+# Usage
+templates = {
+    "fibonacci": "def fibonacci(n):\n    # TODO: implement\n    pass",
+    "factorial": "def factorial(n):\n    # TODO: implement\n    pass"
+}
+
+runtime = Runtime(generate=TemplateGenerate(templates))
+```
+
+## Customizing Verify
+
+Control **what validation criteria** code must meet.
+
+### Built-in Verification
+
+```python
+from a1 import IsFunction, IsLoop, check_syntax, check_dangerous_ops
+
+# Require function definition
+verify_function = IsFunction()
+
+# Require loop structure
+verify_loop = IsLoop()
+
+# ℹ️ **Interesting aside**: Using `IsLoop` with AOT compilation compiles your agent into 
+# a standard agentic while loop (like LangGraph, AutoGen, etc.), except it's compiled 
+# ahead-of-time into a Python function instead of interpreted at runtime.
+
+# Combine multiple validators
+async def verify_all(code, agent):
+    # Syntax check
+    if not check_syntax(code):
+        return (False, "Syntax error")
+    
+    # Security check
+    if check_dangerous_ops(code):
+        return (False, "Contains dangerous operations")
+    
+    # Structural requirements
+    is_valid_func, msg_func = await verify_function.verify(code, agent)
+    if not is_valid_func:
+        return (False, f"Not a function: {msg_func}")
+    
+    is_valid_loop, msg_loop = await verify_loop.verify(code, agent)
+    if not is_valid_loop:
+        return (False, f"No loop found: {msg_loop}")
+    
+    return (True, None)
+
+strategy = Strategy(verify=verify_all)
+```
+
+### Custom Verification
+
+```python
+from a1 import BaseVerify
+import ast
+
+class RequiresTypeHints(BaseVerify):
+    """Verify that code includes type hints."""
+    
+    async def verify(self, code, agent):
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return (False, "Syntax error")
+        
+        # Check all function definitions
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                # Check if function has return type annotation
+                if node.returns is None:
+                    return (False, f"Function '{node.name}' missing return type hint")
+                
+                # Check if all arguments have type annotations
+                for arg in node.args.args:
+                    if arg.annotation is None:
+                        return (False, f"Argument '{arg.arg}' missing type hint")
+        
+        return (True, None)
+
+# Usage
+strategy = Strategy(verify=RequiresTypeHints())
+```
+
+### Test-Based Verification
+
+```python
+class TestVerify(BaseVerify):
+    """Verify code passes test cases."""
+    
+    def __init__(self, test_cases):
+        self.test_cases = test_cases  # List of (input, expected_output)
+    
+    async def verify(self, code, agent):
+        # Execute code to get function
+        namespace = {}
+        try:
+            exec(code, namespace)
+        except Exception as e:
+            return (False, f"Execution error: {e}")
+        
+        # Find the main function (assume first defined function)
+        func = None
+        for name, obj in namespace.items():
+            if callable(obj) and not name.startswith('_'):
+                func = obj
+                break
+        
+        if func is None:
+            return (False, "No callable function found")
+        
+        # Run test cases
+        for input_val, expected in self.test_cases:
+            try:
+                result = func(input_val)
+                if result != expected:
+                    return (False, f"Test failed: {input_val} -> {result} (expected {expected})")
+            except Exception as e:
+                return (False, f"Test error on {input_val}: {e}")
+        
+        return (True, None)
+
+# Usage
+test_cases = [
+    (0, 0),
+    (1, 1),
+    (5, 5),
+    (10, 55)
+]
+
+strategy = Strategy(verify=TestVerify(test_cases))
+```
+
+## Customizing Cost
+
+Control **how code quality/efficiency is scored** for selection.
+
+### Built-in Cost Estimation
+
+```python
+from a1 import BaseCost, compute_code_cost
+
+# Default cost: estimates execution cost based on CFG analysis
+default_cost = BaseCost()
+
+# Uses control flow graph to estimate:
+# - Tool call latencies
+# - Loop multipliers
+# - Branching complexity
+
+strategy = Strategy(cost=default_cost)
+```
+
+### Custom Cost Metrics
+
+```python
+class LineCountCost(BaseCost):
+    """Cost based on lines of code (simpler = better)."""
+    
+    def compute(self, code, agent):
+        lines = code.strip().split('\n')
+        # Filter out empty lines and comments
+        code_lines = [
+            line for line in lines 
+            if line.strip() and not line.strip().startswith('#')
+        ]
+        return float(len(code_lines))
+
+# Usage
+strategy = Strategy(cost=LineCountCost())
+```
+
+### Complexity-Based Cost
+
+```python
+import ast
+
+class CyclomaticComplexityCost(BaseCost):
+    """Cost based on cyclomatic complexity."""
+    
+    def compute(self, code, agent):
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return 1000.0  # High cost for invalid code
+        
+        complexity = 1  # Start at 1
+        
+        for node in ast.walk(tree):
+            # Count decision points
+            if isinstance(node, (ast.If, ast.While, ast.For, ast.ExceptHandler)):
+                complexity += 1
+            elif isinstance(node, ast.BoolOp):
+                complexity += len(node.values) - 1
+        
+        return float(complexity)
+
+# Usage
+strategy = Strategy(cost=CyclomaticComplexityCost())
+```
+
+### Weighted Multi-Metric Cost
+
+```python
+class WeightedCost(BaseCost):
+    """Combine multiple cost metrics with weights."""
+    
+    def __init__(self, metrics, weights):
+        self.metrics = metrics  # List of Cost instances
+        self.weights = weights  # List of weights (must sum to 1.0)
+    
+    async def compute(self, code, agent):
+        import asyncio
+        
+        # Compute all metrics in parallel
+        costs = await asyncio.gather(*[
+            metric.compute(code, agent) 
+            for metric in self.metrics
+        ])
+        
+        # Weighted sum
+        total = sum(c * w for c, w in zip(costs, self.weights))
+        return total
+
+# Usage
+weighted_cost = WeightedCost(
+    metrics=[
+        LineCountCost(),              # Prefer shorter code
+        CyclomaticComplexityCost(),   # Prefer simpler code
+        BaseCost()                    # Consider execution cost
+    ],
+    weights=[0.3, 0.3, 0.4]
+)
+
+strategy = Strategy(cost=weighted_cost)
+```
+
+## Combining Strategies
+
+Mix and match built-in and custom strategies:
+
+```python
+from a1 import (
+    Strategy, 
+    IsFunction, 
+    QualitativeCriteria, 
+    QuantitativeCriteria,
+    LLM
+)
+
+# Custom verification combining structural and LLM checks
+class ComprehensiveVerify(BaseVerify):
+    def __init__(self):
+        self.is_function = IsFunction()
+        self.llm_check = QualitativeCriteria(
+            expression="Code handles errors properly",
+            llm=LLM("gpt-4o-mini"),
+            num_samples=3,
+            min_pass=2
+        )
+    
+    async def verify(self, code, agent):
+        # Structural check
+        is_valid, msg = await self.is_function.verify(code, agent)
+        if not is_valid:
+            return (is_valid, msg)
+        
+        # Syntax check
+        if not check_syntax(code):
+            return (False, "Syntax error")
+        
+        # LLM-based qualitative check
+        return await self.llm_check.verify(code, agent)
+
+# Combine with quantitative cost
+strategy = Strategy(
+    verify=ComprehensiveVerify(),
+    cost=QuantitativeCriteria(
+        expression="Rate complexity (0=simple, 10=complex)",
+        llm=LLM("gpt-4o-mini"),
+        min=0, max=10,
+        agg="avg",
+        num_samples=3
+    ),
+    max_iterations=5,
+    num_candidates=3
+)
+```
+
+## Using Strategies with Agents
+
+### Agent-Level Strategy
+
+Define strategy when creating an agent:
+
+```python
+from a1 import Agent, Strategy
+
+strategy = Strategy(
+    max_iterations=5,
+    num_candidates=3,
+    verify=my_verify,
+    cost=my_cost
+)
+
+agent = Agent(
+    output_schema=dict,
+    strategy=strategy  # Apply to all executions of this agent
+)
+
+# All calls use this strategy
+result1 = runtime.jit(agent, "Task 1")
+result2 = runtime.jit(agent, "Task 2")
+```
+
+### Runtime-Level Strategy (Legacy)
+
+Configure strategy at runtime level:
+
+```python
+from a1 import Runtime
+
+runtime = Runtime(
+    generate=MyGenerate(),
+    verify=[my_verify],
+    cost=my_cost
+)
+
+# All agents use this strategy unless they override
+agent = Agent(output_schema=int)  # Uses runtime strategy
+result = runtime.jit(agent, "Task")
+```
+
+### Per-Call Strategy Override
+
+Override strategy for specific calls:
+
+```python
+# Agent with default strategy
+agent = Agent(output_schema=int)
+
+# Override for high-stakes call
+critical_strategy = Strategy(
+    max_iterations=10,     # More retries
+    num_candidates=5,      # More candidates
+    verify=strict_verify,  # Stricter validation
+    cost=quality_cost      # Optimize for quality, not speed
+)
+
+# Strategy override in aot()
+compiled = await runtime.aot(agent, strategy=critical_strategy)
+
+# Strategy override in jit()
+result = await runtime.jit(agent, strategy=critical_strategy, task="Critical task")
+```
+
+## Early Stopping
+
+Optimize generation time with early stopping thresholds:
+
+```python
+strategy = Strategy(
+    num_candidates=5,
+    
+    # Accept immediately if a candidate has cost < 2.0
+    accept_cost_threshold=2.0,
+    
+    # Start comparing when 3 candidates have cost < 5.0
+    min_candidates_for_comparison=3,
+    compare_cost_threshold=5.0
+)
+
+# Workflow:
+# 1. Generate 5 candidates in parallel
+# 2. As each candidate is verified and costed:
+#    - If cost < 2.0: STOP and accept immediately
+#    - Track candidates with cost < 5.0
+#    - When 3 candidates have cost < 5.0: compare and select best
+# 3. If thresholds not met, wait for all candidates and select best
+```
+
+This can significantly reduce latency when generating many candidates.
+
+## Best Practices
+
+### 1. Start Simple, Add Complexity
+
+```python
+# Start with defaults
+strategy = Strategy()
+
+# Add verification
+strategy = Strategy(verify=IsFunction())
+
+# Add cost estimation
+strategy = Strategy(
+    verify=IsFunction(),
+    cost=BaseCost()
+)
+
+# Add LLM-based criteria
+strategy = Strategy(
+    verify=QualitativeCriteria(...),
+    cost=QuantitativeCriteria(...)
+)
+```
+
+### 2. Balance Retries and Candidates
+
+```python
+# More retries, fewer candidates (sequential)
+strategy = Strategy(
+    max_iterations=10,  # Refine each candidate extensively
+    num_candidates=1    # Only one candidate
+)
+
+# Fewer retries, more candidates (parallel)
+strategy = Strategy(
+    max_iterations=3,   # Less refinement per candidate
+    num_candidates=5    # Try many approaches
+)
+
+# Balanced (recommended)
+strategy = Strategy(
+    max_iterations=3,   # Reasonable refinement
+    num_candidates=3    # Reasonable parallelism
+)
+```
+
+### 3. Use Early Stopping for Latency
+
+```python
+# Production: optimize for latency
+fast_strategy = Strategy(
+    num_candidates=5,
+    accept_cost_threshold=3.0,  # Accept "good enough" quickly
+    min_candidates_for_comparison=2,
+    compare_cost_threshold=6.0
+)
+
+# Development: optimize for quality
+quality_strategy = Strategy(
+    num_candidates=10,
+    accept_cost_threshold=None,  # No early stopping
+    min_candidates_for_comparison=10  # Consider all candidates
+)
+```
+
+### 4. Separate Concerns
+
+```python
+# Verification: hard constraints (must pass)
+verify = QualitativeCriteria(
+    expression="Code passes all test cases",
+    llm=evaluator
+)
+
+# Cost: optimization (select best among passing)
+cost = QuantitativeCriteria(
+    expression="Rate efficiency (0=fast, 10=slow)",
+    llm=scorer
+)
+
+strategy = Strategy(
+    verify=verify,  # Filter
+    cost=cost       # Optimize
+)
+```
+
+### 5. Monitor and Iterate
+
+```python
+# Add logging to understand strategy behavior
+class LoggedStrategy(Strategy):
+    async def select_candidate(self, candidates):
+        print(f"Selecting from {len(candidates)} candidates")
+        for i, (code, cost) in enumerate(candidates):
+            print(f"  Candidate {i+1}: cost = {cost}")
+        
+        selected = await super().select_candidate(candidates)
+        print(f"Selected candidate with cost = {selected[1]}")
+        return selected
+```
+
+## See Also
+
+- [Evaluation Criteria](criteria.md) - QualitativeCriteria and QuantitativeCriteria
+- [Retry and Validation](retry.md) - RetryStrategy configuration
+- [Runtime](../api/runtime.md) - Execution and orchestration
+- [Compilation](../guide/compilation.md) - AOT vs JIT compilation
+
+---
+
+**Next Steps:**
+- Explore [evaluation criteria](criteria.md) for verification and cost
+- Learn about [retry strategies](retry.md) for robust generation
+- See [compilation modes](../guide/compilation.md) for when to use strategies

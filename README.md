@@ -24,14 +24,16 @@ pip install a1-compiler
 
 An agent compiler is a direct replacement for agent frameworks such as Langchain or aisdk, where you define an `Agent` and run. The diference is:
 
-* **Safety:** A1 generates code for each unique agent input, optimizing constantly to shrink the prompt injection attack surface. 
-* **Speed:** A1 makes codegen practical for tool-wielding agents with aggressive parallelism and static checking.
-* **Determinism:** A1 optimizes for determinism via an engineered cost function. For example, it may replace an LLM call with a fast RegEx but may revert on-the-fly if a tool's schema evolves.
-* **Flexibility** A tool in A1 can be instantly constructed from an OpenAPI document, an MCP server, a DB connection string, an fsspec path, a Python function, a Python package, or even just a documentation website URL.
+1. **Safety:** A1 generates code for each unique agent input, optimizing constantly to shrink the prompt injection attack surface. 
+2. **Speed:** A1 makes codegen practical for tool-wielding agents with aggressive parallelism and static checking.
+3. **Determinism:** A1 optimizes for determinism via an engineered cost function. For example, it may replace an LLM call with a fast RegEx but may revert on-the-fly if a tool's schema evolves.
+4. **Flexibility** A tool in A1 can be instantly constructed from an OpenAPI document, an MCP server, a DB connection string, an fsspec path, a Python function, a Python package, or even just a documentation website URL.
 
 Agent compilers emerged from frustration with the MCP protocol and SOTA agent frameworks where every agent runs a static while loop program. Slow, unsafe, and highly nondeterministic. 
 
 An agent compiler can perform the same while loop (just set `Verify=IsLoop()`) but has the freedom to explore superoptimal execution plans, while subject to engineered constraints (e.g. type-safety).
+
+Ultimately the goal is "determinism-maxing": specifying as much of your task as fully deterministic code (100% accuracy) and gradually reducing non-deterministic LLM calls to the bare minimum.
 
 ## 🚀 How to get started?
 
@@ -86,6 +88,17 @@ See the `tests/` directory for extensive examples of everything A1 can do. Docs 
 * **Context engineering** via a simple API that lets compiled code manage multi-agent behavior
 * **Zero lock-in** use any LLM, any secure code execution cloud
 * Only gets better as researchers develop increasingly powerful methods to `Generate`, `Cost` estimate, and `Verify` agent code
+
+## 🙋 FAQ
+
+#### Should I use A1 or Langchain/aisdk/etc?
+Prefer A1 if your task is latency-critical, works with untrusted data, or may need to run code.
+
+#### Is A1 production-ready?
+Yes in terms of API stability. The caveat is that A1 is new.
+
+#### Can we get enterprise support?
+Please don't hesitate to reach out (calebwin@stanford.edu)
 
 ## 🤝 Contributing
 

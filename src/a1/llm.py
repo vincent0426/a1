@@ -139,7 +139,12 @@ def _infer_provider(model: str) -> str:
         return "openai"  # Default to OpenAI
 
 
-def LLM(model: str, input_schema: Optional[type[BaseModel]] = None, output_schema: Optional[type[BaseModel]] = None) -> Tool:
+def LLM(
+    model: str,
+    input_schema: Optional[type[BaseModel]] = None,
+    output_schema: Optional[type[BaseModel]] = None,
+    retry_strategy: Optional[Any] = None  # Will be RetryStrategy from models
+) -> Tool:
     """
     Create an LLM tool that can call language models with function calling support.
     
@@ -153,10 +158,18 @@ def LLM(model: str, input_schema: Optional[type[BaseModel]] = None, output_schem
         model: Model string with optional provider prefix (e.g., "gpt-4.1", "groq:llama-4", "claude-haiku-4-5")
         input_schema: Optional Pydantic model for structured input
         output_schema: Optional Pydantic model for structured output
+        retry_strategy: Optional RetryStrategy for retry logic when output_schema validation fails
+                       (default: RetryStrategy(max_iterations=3, num_candidates=3))
     
     Returns:
         Tool that calls the LLM with function calling and history tracking
     """
+    # Import here to avoid circular dependency
+    from .models import RetryStrategy
+    
+    # Default to 3 parallel candidates with 3 retries each
+    if retry_strategy is None:
+        retry_strategy = RetryStrategy(max_iterations=3, num_candidates=3)
     
     async def execute(
         content: str,
@@ -167,34 +180,67 @@ def LLM(model: str, input_schema: Optional[type[BaseModel]] = None, output_schem
         """
         Execute LLM call with optional function calling support.
         
+        SCHEMA HANDLING OVERVIEW:
+        ========================
+        
+        INPUT SCHEMAS (what the LLM tool receives):
+        - content: str - the prompt
+        - tools: List[Tool] - tools that might have input_schema (can be primitive or complex Pydantic)
+        - context: Context - message history
+        - output_schema: Optional[type[BaseModel]] - target output type for final result
+        
+        TOOL SCHEMAS (what tools define):
+        - tool.input_schema: Pydantic model for validating tool arguments
+        - tool.output_schema: Pydantic model for tool return values (ALWAYS Pydantic wrapped)
+        
+        TOOL EXECUTION BEHAVIOR:
+        1. Non-terminal tools (calculator, search, etc):
+           - Input: kwargs validated against input_schema
+           - Output: ALWAYS a Pydantic model instance (auto-wrapped by Tool.__call__)
+           - Usage: Result added to context, loop continues for next LLM turn
+        
+        2. Terminal tools (Done):
+           - Input: kwargs validated against input_schema
+           - Output: ALWAYS a Pydantic model instance matching output_schema
+           - Usage: Result returned directly as final output
+        
+        LLM TOOL RETURN VALUE:
+        - If terminal tool called: return its output (Pydantic model matching output_schema)
+        - If no terminal tool but tools called: return response_content (string)
+        - If output_schema provided and no tools called: parse response_content into output_schema
+        - Otherwise: return response_content (string)
+        
+        GENERATED CODE EXPECTATIONS:
+        - When generated code calls LLM: expects either string OR output_schema instance
+        - When generated code calls non-LLM tool: auto-extraction happens in _ToolWrapper
+        
+        EXECUTOR AUTO-EXTRACTION (_ToolWrapper):
+        - If tool result is Pydantic model with ONLY 'result' field: extract the value
+        - Example: CalculatorOutput(result=42) -> 42
+        - Reason: Generated code written as `output = Output(sum=int(result))`
+                  not `output = Output(sum=int(result.result))`
+        
         Returns typed output based on output_schema if provided, otherwise string.
         Supports JSON parsing from LLM responses to structured output types.
-        
-        If no tools provided, prepends "Respond with ONLY exactly what is requested: " to prompt.
-        Also extracts large data structures (objects/lists) from content, labels them A, B, etc,
-        and references them in the prompt for cleaner requests.
-        
-        Args:
-            content: The prompt/query to send to the LLM
-            tools: Optional list of tools available for function calling
-            context: Optional Context object for message history tracking
-            output_schema: Optional Pydantic model to parse LLM response into
-        
-        Returns:
-            Instance of output_schema if provided, LLMOutput if tools called, otherwise string
         """
         from .context import Context
         import re
         
         # Determine the target output schema (passed to Done tool if needed)
         target_output_schema = output_schema
+        logger.info(f"LLM execute: output_schema param = {output_schema.__name__ if output_schema else 'None'}, target = {target_output_schema.__name__ if target_output_schema else 'None'}")
         
-        # Use provided context or create throwaway
+        # Use provided context or create new tracked context
         if context is None:
-            context = no_context()
+            from .runtime import new_context
+            context = new_context("intermediate")
         
         # Auto-add Done tool if tools provided but none are terminal
         if tools:
+            # Ensure tools are Tool objects (filter out any that aren't)
+            from .models import Tool as ToolClass
+            tools = [t for t in tools if isinstance(t, ToolClass)]
+            
             has_terminal = any(t.is_terminal for t in tools)
             if not has_terminal:
                 from .builtin_tools import Done
@@ -239,11 +285,8 @@ def LLM(model: str, input_schema: Optional[type[BaseModel]] = None, output_schem
                 # No large data structures, just add the prefix
                 processed_content = f"Respond with ONLY exactly what is requested:\n{content}"
         
-        # Add user message to context
-        context.user(processed_content)
-        
-        # Prepare messages for API call
-        messages = context.to_dict_list()
+        # Add ORIGINAL user message to context (not the processed version with system prompt)
+        context.user(content)
         
         # Convert tools to OpenAI function calling format
         api_tools = None
@@ -260,137 +303,293 @@ def LLM(model: str, input_schema: Optional[type[BaseModel]] = None, output_schem
             provider = _infer_provider(model)
             model_name = model
         
-        logger.info(f"Calling {provider}:{model_name} with {len(messages)} messages")
+        # Loop until terminal tool is called or no tools are invoked
+        max_tool_calls = 10  # Prevent infinite loops
+        tool_call_count = 0
         
-        # Call LLM via any-llm
-        call_params = {
-            "model": model_name,
-            "provider": provider,
-            "messages": messages,
-        }
-        
-        if api_tools:
-            call_params["tools"] = api_tools
-            call_params["tool_choice"] = "auto"
-        
-        # Call LLM with retry logic for tool validation errors
-        max_retries = 2
-        for attempt in range(max_retries):
-            try:
-                response = await acompletion(**call_params)
-                break  # Success
-            except Exception as e:
-                # Retry without tool_choice if this looks like a tool validation error
-                error_msg = str(e)
-                if "tool call validation failed" in error_msg and attempt < max_retries - 1:
-                    logger.warning(f"Attempt {attempt+1}: Tool validation error, retrying")
-                    call_params.pop("tool_choice", None)
-                    continue
-                raise
-        
-        # Extract response
-        message = response.choices[0].message
-        response_content = message.content or ""
-        tool_calls = getattr(message, 'tool_calls', None)
-        
-        # Add assistant message to context
-        if tool_calls:
-            tool_call_dicts = [
-                {
-                    "id": tc.id,
-                    "type": tc.type,
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments
-                    }
-                } for tc in tool_calls
-            ]
-            context.assistant(response_content, tool_calls=tool_call_dicts)
-        else:
-            context.assistant(response_content)
-        
-        # Execute tool calls if present
-        tools_called_list = []
-        if tool_calls and tools:
-            logger.info(f"Executing {len(tool_calls)} tool calls")
+        while tool_call_count < max_tool_calls:
+            # Prepare messages for API call
+            messages = context.to_dict_list()
             
-            for tool_call in tool_calls:
-                func_name = _clean_tool_name(tool_call.function.name)
-                base_name = _extract_base_tool_name(func_name)
-                func_args = json.loads(tool_call.function.arguments)
-                
-                # Find tool by name (try multiple strategies)
-                tool = next((t for t in tools if 
-                    t.name == func_name or 
-                    t.name == base_name or
-                    _clean_tool_name(t.name) == func_name or
-                    _extract_base_tool_name(t.name) == base_name
-                ), None)
-                
-                if tool:
-                    try:
-                        logger.info(f"Calling tool: {func_name}({func_args})")
-                        result = await tool(**func_args)
-                        
-                        # Add result to context
-                        context.tool(
-                            content=json.dumps(result) if isinstance(result, dict) else str(result),
-                            name=func_name,
-                            tool_call_id=tool_call.id
-                        )
-                        logger.info(f"Tool {func_name} result: {result}")
-                        tools_called_list.append(tool)
-                        
-                        # If terminal tool, return the result
-                        if tool.is_terminal:
-                            # If target_output_schema is set and result matches it, return as-is
-                            if target_output_schema and isinstance(result, target_output_schema):
-                                return result
-                            # Try to convert result to target schema if needed
-                            elif target_output_schema:
-                                if isinstance(result, dict):
-                                    return target_output_schema(**result)
-                                else:
-                                    field_name = list(target_output_schema.model_fields.keys())[0]
-                                    return target_output_schema(**{field_name: result})
-                            # Default: return as LLMOutput
-                            else:
-                                return LLMOutput(content=str(result), tools_called=[tool])
-                    except Exception as e:
-                        logger.error(f"Error executing {func_name}: {e}")
-                        context.tool(
-                            content=f"Error: {str(e)}",
-                            name=func_name,
-                            tool_call_id=tool_call.id
-                        )
-                else:
-                    logger.warning(f"Tool {func_name} not found")
-        
-        # Return based on output_schema or tools called
-        if tools_called_list:
-            # If tools were called, return LLMOutput
-            return LLMOutput(content=response_content, tools_called=tools_called_list)
-        elif output_schema and output_schema != LLMOutput:
-            # Try to parse response into output_schema
-            try:
-                # First try parsing as JSON
-                parsed_data = json.loads(response_content)
-                if isinstance(parsed_data, dict):
-                    return output_schema(**parsed_data)
-                else:
-                    # If JSON is a primitive, wrap it in the schema
-                    field_name = list(output_schema.model_fields.keys())[0]
-                    return output_schema(**{field_name: parsed_data})
-            except (json.JSONDecodeError, ValueError, TypeError) as e:
-                # If JSON parsing fails, try wrapping the content directly
-                logger.debug(f"Could not parse response as JSON, wrapping in schema: {e}")
+            logger.info(f"Calling {provider}:{model_name} with {len(messages)} messages (tool_call_count={tool_call_count})")
+            
+            # Call LLM via any-llm
+            call_params = {
+                "model": model_name,
+                "provider": provider,
+                "messages": messages,
+            }
+            
+            if api_tools:
+                call_params["tools"] = api_tools
+                call_params["tool_choice"] = "auto"
+            
+            # If output_schema is provided and we're not using tools, use response_format
+            # any-llm accepts either dict or Pydantic BaseModel type
+            if target_output_schema and not api_tools:
+                call_params["response_format"] = target_output_schema
+            
+            # Call LLM with retry logic for tool validation errors
+            max_retries = 2
+            for attempt in range(max_retries):
                 try:
-                    field_name = list(output_schema.model_fields.keys())[0]
-                    return output_schema(**{field_name: response_content})
-                except Exception as e2:
-                    # Fall back to returning string
-                    logger.warning(f"Could not construct output schema: {e2}")
-                    return response_content
+                    response = await acompletion(**call_params)
+                    break  # Success
+                except Exception as e:
+                    # Retry without tool_choice if this looks like a tool validation error
+                    error_msg = str(e)
+                    if "tool call validation failed" in error_msg and attempt < max_retries - 1:
+                        logger.warning(f"Attempt {attempt+1}: Tool validation error, retrying")
+                        call_params.pop("tool_choice", None)
+                        continue
+                    raise
+            
+            # Extract response
+            message = response.choices[0].message
+            response_content = message.content or ""
+            tool_calls = getattr(message, 'tool_calls', None)
+            
+            logger.debug(f"LLM response content: {repr(response_content)}")
+            logger.debug(f"LLM tool_calls: {tool_calls}")
+            
+            # Add assistant message to context
+            if tool_calls:
+                tool_call_dicts = [
+                    {
+                        "id": tc.id,
+                        "type": tc.type,
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments
+                        }
+                    } for tc in tool_calls
+                ]
+                context.assistant(response_content, tool_calls=tool_call_dicts)
+            else:
+                context.assistant(response_content)
+            
+            # Execute tool calls if present
+            if tool_calls and tools:
+                logger.info(f"Executing {len(tool_calls)} tool calls")
+                any_terminal_called = False
+                
+                for tool_call in tool_calls:
+                    func_name = _clean_tool_name(tool_call.function.name)
+                    base_name = _extract_base_tool_name(func_name)
+                    func_args = json.loads(tool_call.function.arguments)
+                    
+                    # Find tool by name (try multiple strategies)
+                    tool = next((t for t in tools if 
+                        t.name == func_name or 
+                        t.name == base_name or
+                        _clean_tool_name(t.name) == func_name or
+                        _extract_base_tool_name(t.name) == base_name
+                    ), None)
+                    
+                    if tool:
+                        try:
+                            logger.info(f"Calling tool: {func_name}({func_args})")
+                            result = await tool(**func_args)
+                            
+                            # Add result to context - convert Pydantic model to string for context
+                            if hasattr(result, 'model_dump'):
+                                result_str = json.dumps(result.model_dump())
+                            elif isinstance(result, dict):
+                                result_str = json.dumps(result)
+                            else:
+                                result_str = str(result)
+                            
+                            context.tool(
+                                content=result_str,
+                                name=func_name,
+                                tool_call_id=tool_call.id
+                            )
+                            logger.info(f"Tool {func_name} result: {result}")
+                            
+                            # If terminal tool, return the result
+                            if tool.is_terminal:
+                                any_terminal_called = True
+                                # Result from terminal tool (Done) should match or be convertible to output_schema
+                                logger.debug(f"Terminal tool called. result type: {type(result).__name__}, "
+                                           f"target_output_schema: {target_output_schema.__name__ if target_output_schema else 'None'}")
+                                
+                                if target_output_schema:
+                                    # Check if result already matches target schema
+                                    if isinstance(result, target_output_schema):
+                                        logger.info(f"Result is already {target_output_schema.__name__}")
+                                        return result
+                                    
+                                    # Try to convert to target schema
+                                    # Handle case where result is wrapped in Done's output schema
+                                    if isinstance(result, BaseModel):
+                                        # Extract fields from result and convert to target schema
+                                        try:
+                                            # Get result's fields
+                                            result_fields = result.__class__.model_fields.keys()
+                                            
+                                            # If result has exactly one field, extract it
+                                            if len(result_fields) == 1:
+                                                field_name = list(result_fields)[0]
+                                                extracted_value = getattr(result, field_name)
+                                                
+                                                # Now check target schema
+                                                target_fields = target_output_schema.model_fields.keys()
+                                                if len(target_fields) == 1:
+                                                    # Both are single-field schemas - wrap extracted value
+                                                    target_field = list(target_fields)[0]
+                                                    logger.info(f"Converting {field_name}={extracted_value} to {target_field}")
+                                                    return target_output_schema(**{target_field: extracted_value})
+                                                else:
+                                                    # Target is multi-field - try full conversion
+                                                    if isinstance(extracted_value, dict):
+                                                        return target_output_schema(**extracted_value)
+                                                    elif isinstance(extracted_value, BaseModel):
+                                                        return target_output_schema(**extracted_value.model_dump())
+                                                    else:
+                                                        # Can't convert
+                                                        target_field = list(target_fields)[0]
+                                                        return target_output_schema(**{target_field: extracted_value})
+                                            else:
+                                                # Multi-field result - try full dict conversion
+                                                return target_output_schema(**result.model_dump())
+                                        except Exception as e:
+                                            logger.warning(f"Could not convert {type(result).__name__} to {target_output_schema.__name__}: {e}")
+                                            # Fallback: wrap in first field of target schema
+                                            target_field = list(target_output_schema.model_fields.keys())[0]
+                                            return target_output_schema(**{target_field: result})
+                                    elif isinstance(result, dict):
+                                        return target_output_schema(**result)
+                                    else:
+                                        # Primitive value - wrap in target schema
+                                        field_name = list(target_output_schema.model_fields.keys())[0]
+                                        return target_output_schema(**{field_name: result})
+                                else:
+                                    # No target schema - return result as-is
+                                    logger.info("No target output schema, returning result as-is")
+                                    return result
+                        except Exception as e:
+                            logger.error(f"Error executing {func_name}: {e}")
+                            context.tool(
+                                content=f"Error: {str(e)}",
+                                name=func_name,
+                                tool_call_id=tool_call.id
+                            )
+                    else:
+                        logger.warning(f"Tool {func_name} not found")
+                
+                # If terminal tool was called, we should have returned by now
+                # Otherwise, loop continues to next LLM turn
+                if any_terminal_called:
+                    break
+                
+                tool_call_count += 1
+                continue
+            else:
+                # No tool calls - exit loop
+                break
+        
+        # Return based on output_schema or response content
+        if output_schema and output_schema != LLMOutput:
+            # Get retry settings from retry_strategy (should always be set with defaults now)
+            max_iterations = retry_strategy.max_iterations if retry_strategy else 3
+            num_candidates = retry_strategy.num_candidates if retry_strategy else 3
+            
+            # Try to parse response into output_schema with parallel candidates + retries
+            import asyncio
+            
+            async def try_validate_response(response_text: str, iteration: int, candidate_idx: int) -> Optional[BaseModel]:
+                """Try to validate a single response against output_schema."""
+                try:
+                    # First try parsing as JSON
+                    parsed_data = json.loads(response_text)
+                    if isinstance(parsed_data, dict):
+                        result = output_schema(**parsed_data)
+                        logger.info(f"Candidate {candidate_idx} iteration {iteration}: Successfully validated")
+                        return result
+                    else:
+                        # If JSON is a primitive, wrap it in the schema
+                        field_name = list(output_schema.model_fields.keys())[0]
+                        result = output_schema(**{field_name: parsed_data})
+                        logger.info(f"Candidate {candidate_idx} iteration {iteration}: Successfully validated (wrapped)")
+                        return result
+                except (json.JSONDecodeError, ValueError, TypeError) as e:
+                    # If JSON parsing fails, try wrapping the content directly
+                    logger.debug(f"Candidate {candidate_idx} iteration {iteration}: JSON parse failed: {e}")
+                    try:
+                        field_name = list(output_schema.model_fields.keys())[0]
+                        result = output_schema(**{field_name: response_text})
+                        logger.info(f"Candidate {candidate_idx} iteration {iteration}: Successfully validated (direct wrap)")
+                        return result
+                    except Exception as e2:
+                        logger.debug(f"Candidate {candidate_idx} iteration {iteration}: Validation failed: {e2}")
+                        return None
+            
+            async def generate_and_validate_candidate(candidate_idx: int) -> Optional[BaseModel]:
+                """Generate responses with retries for a single candidate."""
+                candidate_response = response_content  # Start with initial response
+                
+                for iteration in range(max_iterations):
+                    # Try to validate current response
+                    validated = await try_validate_response(candidate_response, iteration, candidate_idx)
+                    if validated is not None:
+                        return validated
+                    
+                    # Validation failed - retry if we have iterations left
+                    if iteration < max_iterations - 1:
+                        logger.warning(f"Candidate {candidate_idx} iteration {iteration}: Validation failed, retrying...")
+                        
+                        # Re-call LLM with stronger instruction
+                        retry_messages = context.to_dict_list()
+                        retry_messages.append({
+                            "role": "user",
+                            "content": f"Your previous response could not be validated. Please respond with valid JSON matching this exact schema: {output_schema.model_json_schema()}"
+                        })
+                        
+                        retry_params = {
+                            "model": model_name,
+                            "provider": provider,
+                            "messages": retry_messages,
+                        }
+                        
+                        if target_output_schema and not api_tools:
+                            retry_params["response_format"] = target_output_schema
+                        
+                        try:
+                            retry_response = await acompletion(**retry_params)
+                            candidate_response = retry_response.choices[0].message.content or ""
+                            logger.debug(f"Candidate {candidate_idx} iteration {iteration}: Got retry response: {candidate_response[:100]}...")
+                        except Exception as retry_error:
+                            logger.error(f"Candidate {candidate_idx} iteration {iteration}: Retry call failed: {retry_error}")
+                            break
+                
+                return None  # All iterations failed for this candidate
+            
+            # Try initial response first (candidate 0, iteration 0)
+            initial_result = await try_validate_response(response_content, 0, 0)
+            if initial_result is not None:
+                return initial_result
+            
+            # If we have multiple candidates or iterations, run them in parallel
+            if num_candidates > 1 or max_iterations > 1:
+                logger.info(f"Initial validation failed. Trying {num_candidates} candidates with {max_iterations} iterations each...")
+                
+                # Create tasks for all candidates
+                tasks = [generate_and_validate_candidate(i) for i in range(num_candidates)]
+                
+                # Wait for first successful result
+                for coro in asyncio.as_completed(tasks):
+                    result = await coro
+                    if result is not None:
+                        logger.info(f"Got successful validation from one of {num_candidates} candidates")
+                        # Cancel remaining tasks
+                        for task in tasks:
+                            if not task.done():
+                                task.cancel()
+                        return result
+            
+            # All attempts failed - fall back to returning string
+            logger.warning(f"All validation attempts failed ({num_candidates} candidates × {max_iterations} iterations). Returning raw content.")
+            return response_content
         else:
             # Default: return string content
             return response_content

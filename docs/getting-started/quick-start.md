@@ -1,0 +1,61 @@
+# Quick Start
+
+Get up and running with A1 in 5 minutes.
+
+## Your First Agent
+
+```bash
+pip install a1-compiler
+```
+
+```python
+from a1 import Agent, tool, LLM
+from pydantic import BaseModel
+
+# Define a tool
+@tool(name="add", description="Add two numbers")
+async def add(a: int, b: int) -> int:
+    return a + b
+
+# Define schemas
+class MathInput(BaseModel):
+    problem: str
+
+class MathOutput(BaseModel):
+    answer: int
+
+# Create an agent
+agent = Agent(
+    name="math_agent",
+    description="Solves simple math problems",
+    input_schema=MathInput,
+    output_schema=MathOutput,
+    tools=[add, LLM(model="gpt-4o")],
+)
+
+async def main():
+    # Compile ahead-of-time
+    compiled = await agent.aot()
+    result = await compiled.execute(problem="What is 2 + 2?")
+    print(f"AOT result: {result}")
+
+    # Or execute just-in-time
+    result = await agent.jit(problem="What is 5 + 3?")
+    print(f"JIT result: {result}")
+
+import asyncio
+asyncio.run(main())
+```
+
+## Key Concepts
+
+1. **Tools** - Functions that agents can call.
+2. **Agent** - A composition of tools with input/output schemas.
+3. **Compilation** - AOT (ahead-of-time) or JIT (just-in-time) modes.
+4. **Schemas** - Pydantic models for type-safe input/output.
+
+## Next Steps
+
+- Learn about [Agents](../guide/agents.md)
+- Explore [Tools](../guide/tools.md)
+- Understand [Core Concepts](concepts.md)

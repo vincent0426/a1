@@ -883,6 +883,118 @@ def fix_generated_code(code: str, is_aot: bool = False, function_name: str = "ge
     return code
 
 
+def normalize_generated_code(code: str) -> str:
+    """
+    Normalize LLM-generated code - handles multiple output formats.
+    
+    The LLM may return:
+    1. Just the function body (ideal)
+    2. Function body with extra indentation
+    3. Complete function definition (need to extract body)
+    4. Function with wrong name (extract body, ignore name)
+    5. Code wrapped in markdown fences
+    6. Code with comments
+    
+    This method:
+    - Removes markdown code fences (```python, ```)
+    - Extracts function body if full function definition is present
+    - Normalizes indentation (removes common leading whitespace)
+    - Removes comments (as they violate generation RULES)
+    
+    Args:
+        code: Raw generated code from LLM
+        
+    Returns:
+        Normalized function body ready for execution
+        
+    Example:
+        >>> code = '''```python
+        ... async def parser(problem: str) -> Output:
+        ...     result = await llm(problem)
+        ...     return result
+        ... ```'''
+        >>> print(normalize_generated_code(code))
+        result = await llm(problem)
+        return result
+    """
+    if not code:
+        return code
+    
+    # Step 1: Remove markdown code fences (but don't strip yet - preserve line indentation)
+    code = re.sub(r'^```python\s*\n', '', code)
+    code = re.sub(r'^```py\s*\n', '', code)
+    code = re.sub(r'^```\s*\n', '', code)
+    code = re.sub(r'\n```\s*$', '', code)
+    
+    # Step 2: Check if this is a complete function definition
+    # Try to parse it as Python to see if it's a function
+    try:
+        tree = ast.parse(code)
+        # Check if the code is a single async function definition
+        if (len(tree.body) == 1 and 
+            isinstance(tree.body[0], ast.AsyncFunctionDef)):
+            func_def = tree.body[0]
+            
+            # Extract just the function body
+            # Get the source lines
+            lines = code.splitlines()
+            
+            # Find where the function body starts (after the signature and docstring)
+            body_start_line = None
+            
+            for i, node in enumerate(func_def.body):
+                # Skip docstring if present
+                if i == 0 and isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+                    continue
+                # First non-docstring statement
+                body_start_line = node.lineno - 1  # Convert to 0-indexed
+                break
+            
+            if body_start_line is not None:
+                # Extract lines from body_start_line onwards
+                body_lines = lines[body_start_line:]
+                code = '\n'.join(body_lines)
+    except SyntaxError:
+        # Not a valid function definition, treat as body
+        pass
+    
+    # Step 3: Normalize indentation (remove common leading whitespace)
+    lines = code.splitlines()
+    if not lines:
+        return code
+    
+    # Find minimum indentation (ignoring empty lines)
+    min_indent = float('inf')
+    for line in lines:
+        if line.strip():  # Skip empty lines
+            indent = len(line) - len(line.lstrip())
+            min_indent = min(min_indent, indent)
+    
+    # Remove the common indentation
+    if min_indent > 0 and min_indent != float('inf'):
+        normalized_lines = []
+        for line in lines:
+            if line.strip():  # Non-empty line
+                normalized_lines.append(line[min_indent:])
+            else:  # Empty line
+                normalized_lines.append('')
+        code = '\n'.join(normalized_lines)
+    
+    # Step 4: Remove comments (they violate RULES)
+    lines = code.splitlines()
+    code_lines = []
+    for line in lines:
+        # Remove inline comments but keep strings with # in them
+        stripped = line.strip()
+        if stripped.startswith('#'):
+            # Skip full-line comments
+            continue
+        # Keep the line (inline comments in strings are preserved)
+        code_lines.append(line)
+    
+    return '\n'.join(code_lines).strip()
+
+
 # ============================================================================
 # Output Validation
 # ============================================================================

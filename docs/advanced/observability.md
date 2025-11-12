@@ -1,0 +1,91 @@
+# Observability
+
+Monitor and trace agent execution with OpenTelemetry.
+
+## Setup
+
+A1 integrates with OpenTelemetry for observability:
+
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.exporter.jaeger import JaegerExporter
+
+# Configure tracing
+jaeger_exporter = JaegerExporter(agent_host_name="localhost")
+trace.set_tracer_provider(TracerProvider())
+trace.get_tracer_provider().add_span_processor(
+    BatchSpanProcessor(jaeger_exporter)
+)
+```
+
+## Tracing Agent Execution
+
+Agent execution is automatically traced:
+
+```python
+result = await agent.jit(problem="What is 2+2?")
+
+# Traces include:
+# - span.name: "jit"
+# - agent.name: "math_agent"
+# - generation.num_candidates: 3
+# - generation.best_cost: 0.45
+```
+
+## Custom Spans
+
+Add custom tracing:
+
+```python
+from opentelemetry import trace
+
+tracer = trace.get_tracer(__name__)
+
+with tracer.start_as_current_span("my_operation") as span:
+    span.set_attribute("input.size", len(data))
+    
+    result = await process(data)
+    
+    span.set_attribute("output.size", len(result))
+```
+
+## Metrics
+
+Track key metrics:
+
+```python
+from opentelemetry.metrics import get_meter
+
+meter = get_meter(__name__)
+counter = meter.create_counter("agent.calls")
+histogram = meter.create_histogram("agent.latency")
+
+# Usage
+counter.add(1)
+histogram.record(execution_time)
+```
+
+## Debugging
+
+Enable debug logging:
+
+```python
+import logging
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger("a1")
+logger.setLevel(logging.DEBUG)
+```
+
+## Integration with Tools
+
+- **Jaeger**: Distributed tracing visualization
+- **Prometheus**: Metrics collection
+- **DataDog**: Application performance monitoring
+- **New Relic**: Full-stack observability
+
+## Next Steps
+
+- Learn about [Custom Strategies](strategies.md)
+- Explore [Context Engineering](context.md)

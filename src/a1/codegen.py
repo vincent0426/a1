@@ -9,7 +9,7 @@ import json
 import logging
 import re
 from typing import Optional, List, Tuple, Any, Dict, Union
-from .code_utils import generate_nested_pydantic_classes
+from .code_utils import generate_nested_pydantic_classes, normalize_generated_code
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,10 @@ data = await tool_a()
 match = llm(f"most similar item in {data} to 'abraham'")
 output = llm(f"summary of {match}")
 """
+
+# E6: Multi-part
+# data = await tool_a()
+# raise Exception(f"I see that data is {data}, but I need to process it further.")
 
 EXAMPLE_FUNCTION = """
 E1: simple function
@@ -156,8 +160,10 @@ class BaseGenerate(Generate):
         past_attempts: Optional[List[Tuple[str, str]]] = None,
     ) -> Optional[Tuple[str, str]]:
         """Generate a single code candidate using LLM, returning (definition_code, generated_code) tuple."""
+        import json
+        
         # Build definition code
-        definition_code = self._build_definition_code(agent, return_function=return_function)
+        definition_code = self._build_definition_code(agent, return_function=return_function, task=task)
         
         # Build conversation history
         conversation = []
@@ -193,24 +199,43 @@ If an error is reported, fix the previously generated code accordingly.
             prompt_parts.append("```")
         else:
             # Initial generation - show definitions and ask for completion
-            prompt_parts.append("```python")
-            prompt_parts.append(definition_code)
-            prompt_parts.append("```")
-            prompt_parts.append("")
             if return_function:
-                prompt_parts.append(f"TASK: {task}")
-                prompt_parts.append("")
-                prompt_parts.append("Generate ONLY the function body to complete the async def shown above.")
-                prompt_parts.append("Do NOT repeat the function signature or redefine schemas/tools.")
-                prompt_parts.append("Just write the implementation inside the function.")
+                # For AOT mode: show the function template WITHOUT closing backticks
+                # so the LLM continues writing the function body
+                prompt_parts.append("```python")
+                prompt_parts.append(definition_code)
+                # DO NOT close backticks - leave open for LLM to continue
             else:
-                prompt_parts.append(f"TASK: {task}")
+                # For JIT mode: assign input values and leave code block open
+                # Parse task to get input values
+                try:
+                    input_values = json.loads(task)
+                except:
+                    input_values = {}
+                
+                prompt_parts.append("```python")
+                prompt_parts.append(definition_code)
                 prompt_parts.append("")
-                prompt_parts.append("Generate code to accomplish the task using the tools defined above.")
+                for key, value in input_values.items():
+                    # Format value appropriately
+                    if isinstance(value, str):
+                        prompt_parts.append(f"{key} = {repr(value)}")
+                    else:
+                        prompt_parts.append(f"{key} = {value}")
+                prompt_parts.append("")
+                prompt_parts.append("# RESPOND WITH YOUR CODE HERE")
+                # DO NOT close backticks - leave open for LLM to continue
             # Note: We deliberately leave it open - the LLM will generate code
         
         prompt = '\n'.join(prompt_parts)
         conversation.append({"role": "user", "content": prompt})
+        
+        # Log the full prompt for debugging
+        logger.info("=" * 80)
+        logger.info("PROMPT TO LLM FOR CODE GENERATION:")
+        logger.info("=" * 80)
+        logger.info(prompt)
+        logger.info("=" * 80)
         
         # Call LLM
         try:
@@ -235,13 +260,25 @@ If an error is reported, fix the previously generated code accordingly.
             if not generated_code:
                 return None
             
+            # For AOT mode, normalize indentation
+            # The LLM sometimes adds extra indentation thinking it's inside a function
+            if return_function:
+                generated_code = normalize_generated_code(generated_code)
+            
+            # Log the generated code for debugging
+            logger.info("=" * 80)
+            logger.info("GENERATED CODE FROM LLM:")
+            logger.info("=" * 80)
+            logger.info(generated_code)
+            logger.info("=" * 80)
+            
             return (definition_code, generated_code)
             
         except Exception as e:
             logger.error(f"Code generation failed: {e}")
             return None
     
-    def _build_definition_code(self, agent: Any, return_function: bool = False) -> str:
+    def _build_definition_code(self, agent: Any, return_function: bool = False, task: str = "") -> str:
         """Build definition code showing tool signatures and agent schemas."""
         lines = []
         
@@ -249,7 +286,7 @@ If an error is reported, fix the previously generated code accordingly.
         # The generated code can also use imports - they will work in exec()
         
         lines.append("from pydantic import BaseModel, Field")
-        lines.append("from typing import Optional, List, Dict, Any, Union, Literal")
+        lines.append("from typing import Optional, List, Dict, Any, Union, Literal, Type")
         lines.append("")
         
         # Add skill module imports
@@ -285,11 +322,11 @@ If an error is reported, fix the previously generated code accordingly.
         lines.append("")
         
         # Show agent's INPUT schema for function parameters
-        # For JIT, create actual variables; for AOT, show the class
+        # For JIT, declare variables (values assigned in prompt); for AOT, show the class
         if hasattr(agent.input_schema, '__name__') and hasattr(agent.input_schema, 'model_fields'):
             if not return_function:
-                # JIT mode: Create actual typed variables for input fields
-                # These will be provided at runtime
+                # JIT mode: Just declare variable names with type hints
+                # Actual values will be assigned in the prompt
                 for field_name, field_info in agent.input_schema.model_fields.items():
                     # Get type annotation as string
                     if hasattr(field_info.annotation, '__name__'):
@@ -297,8 +334,8 @@ If an error is reported, fix the previously generated code accordingly.
                     else:
                         field_type = str(field_info.annotation)
                     
-                    # Create a variable assignment (will be replaced at runtime)
-                    lines.append(f"{field_name}: {field_type} = None  # provided at runtime")
+                    # Just declare the variable with type hint (no assignment yet)
+                    lines.append(f"{field_name}: {field_type}")
                 lines.append("")
             else:
                 # AOT mode: show the full input schema class
@@ -488,42 +525,32 @@ If an error is reported, fix the previously generated code accordingly.
         lines.append("CTX: Dict[str, Context] = {'main': Context()}")
         lines.append("")
         
-        # Generate LLM tool naming map and add to definition
+        # Add LLM tools with short names (llm_a, llm_b, etc.)
         llm_tools = [t for t in agent.get_all_tools() if "llm" in t.name.lower()]
         if llm_tools:
             tool_name_map = generate_tool_names(llm_tools)
-            lines.append("# ============================================================================")
-            lines.append("# LLM TOOL NAMING MAP")
-            lines.append("# ============================================================================")
-            for original_name, short_name in tool_name_map.items():
-                lines.append(f"# {original_name} -> {short_name}")
-            lines.append("")
-        
-        # Add LLM tools (simplified signatures)
-        for tool in agent.get_all_tools():
-            if "llm" in tool.name.lower():
-                lines.append(f"async def {tool.name}(content: str) -> str:")
+            for tool in llm_tools:
+                short_name = tool_name_map[tool.name]
+                lines.append(f"async def {short_name}(content: Any, output_schema: Optional[Type[BaseModel]] = None) -> Union[str, BaseModel]:")
                 lines.append(f'    """')
                 lines.append(f'    {tool.description}')
                 lines.append(f'    """')
-                lines.append(f'    raise NotImplementedError(f"Tool {tool.name} called but not provided at runtime. This should be called via the executor environment.")')
+                lines.append(f'    raise NotImplementedError(f"Tool {short_name} called but not provided at runtime. This should be called via the executor environment.")')
                 lines.append('')
         
-        # RULES from global variable
-        lines.append("# RULES:")
-        for rule in RULES.strip().split('\n'):
-            rule = rule.strip()
-            if rule.startswith('- '):
-                lines.append(f"# {rule}")
-            elif rule:
-                lines.append(f"# - {rule}")
+        # RULES from global variable (only for JIT mode)
+        if not return_function:
+            # Get the actual output schema name for the rule
+            output_schema_name = agent.output_schema.__name__ if hasattr(agent.output_schema, '__name__') else "Output"
+            lines.append("# RULES:")
+            lines.append("# - Do NOT include comments in your code")
+            lines.append(f"# - Output must be assigned to `output` with type `{output_schema_name}`")
         
         # For JIT (code blocks), end with TASK and code section
         if not return_function:
             lines.append("")
             lines.append(f"# YOUR TASK IS: {agent.description}")
             lines.append("")
-            lines.append("# YOUR CODE HERE")
         else:
             # For AOT (functions), show the function signature and let LLM fill body
             # Build function signature from input schema
@@ -544,13 +571,15 @@ If an error is reported, fix the previously generated code accordingly.
             # Get output schema name
             output_name = agent.output_schema.__name__ if hasattr(agent.output_schema, '__name__') else "Output"
             
-            # Generate template signature - show function sig, docstring, but leave body open
-            lines.append("#")
+            # Generate template signature - show function sig, docstring, leave body open
+            lines.append("")
             lines.append(f"async def {agent.name}({param_str}) -> {output_name}:")
             if agent.description:
                 lines.append(f'    """')
                 lines.append(f'    {agent.description}')
                 lines.append(f'    """')
+            lines.append(f'    # TASK: {task}')
+            lines.append(f'    # RESPOND WITH ONLY YOUR CODE HERE')
         
         return '\n'.join(lines)
     

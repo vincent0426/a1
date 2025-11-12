@@ -1,0 +1,94 @@
+# Agents
+
+An **Agent** is the core abstraction in A1. It combines tools, schemas, and behavior into a reusable unit.
+
+## Creating an Agent
+
+```python
+from a1 import Agent, tool, LLM
+from pydantic import BaseModel, Field
+
+# Define tools
+@tool(name="add", description="Add two numbers")
+async def add(a: int, b: int) -> int:
+    return a + b
+
+@tool(name="multiply", description="Multiply two numbers")
+async def multiply(a: int, b: int) -> int:
+    return a * b
+
+# Define schemas
+class MathInput(BaseModel):
+    expression: str = Field(..., description="Math expression to solve")
+
+class MathOutput(BaseModel):
+    result: float = Field(..., description="The computed result")
+
+# Create agent
+agent = Agent(
+    name="calculator",
+    description="Solves mathematical expressions",
+    input_schema=MathInput,
+    output_schema=MathOutput,
+    tools=[add, multiply, LLM(model="gpt-4o")],
+)
+```
+
+## Execution Modes
+
+### AOT (Ahead-of-Time)
+
+Compile once, execute many times:
+
+```python
+# Compile
+compiled = await agent.aot()
+
+# Use multiple times
+for i in range(100):
+    result = await compiled.execute(expression=f"{i} + {i+1}")
+    print(result)
+```
+
+### JIT (Just-in-Time)
+
+Optimize for each unique input:
+
+```python
+result = await agent.jit(expression="(2 + 3) * 4")
+```
+
+## Agent Properties
+
+- **name**: Unique identifier
+- **description**: What the agent does
+- **input_schema**: Pydantic model for inputs
+- **output_schema**: Pydantic model for outputs
+- **tools**: Available tools (Tool, ToolSet, or LLM instances)
+- **skills**: Optional reusable knowledge
+
+## Accessing Tools
+
+```python
+# Get all tools (flattens ToolSets)
+all_tools = agent.get_all_tools()
+
+# Get specific tool
+add_tool = agent.get_tool("add")
+```
+
+## Saving and Loading
+
+```python
+# Save to file
+agent.save_to_file("my_agent.json")
+
+# Load from file
+agent = Agent.load_from_file("my_agent.json")
+```
+
+## Next Steps
+
+- Learn about [Tools](tools.md)
+- Explore [Compilation](compilation.md)
+- Use [RAG](rag.md) for knowledge

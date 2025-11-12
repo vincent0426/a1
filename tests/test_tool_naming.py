@@ -141,7 +141,7 @@ class TestToolNamingInDefinitionCode:
     """Test that tool naming appears in definition code."""
     
     def test_tool_naming_in_definition_code(self):
-        """Test tool naming map appears in generated definition code."""
+        """Test short tool names (llm_a, llm_b) appear in generated definition code."""
         llm_tool = LLM("gpt-4o-mini")
         
         agent = Agent(
@@ -156,11 +156,13 @@ class TestToolNamingInDefinitionCode:
         gen = BaseGenerate(llm_tool=llm_tool)
         definition_code = gen._build_definition_code(agent, return_function=False)
         
-        # Should contain the naming map section
-        assert "LLM TOOL NAMING MAP" in definition_code or len(agent.get_all_tools()) == 0
+        # Should contain short tool names like llm_a
+        llm_tools = [t for t in agent.get_all_tools() if "llm" in t.name.lower()]
+        if llm_tools:
+            assert "llm_a" in definition_code  # First LLM tool should be llm_a
     
     def test_tool_naming_map_comment(self):
-        """Test that tool naming is shown as comment."""
+        """Test that short tool names are used in function definitions."""
         llm_tool = LLM("gpt-4o-mini")
         
         agent = Agent(
@@ -174,10 +176,10 @@ class TestToolNamingInDefinitionCode:
         gen = BaseGenerate(llm_tool=llm_tool)
         definition_code = gen._build_definition_code(agent, return_function=False)
         
-        # If there are LLM tools, should see the mapping comments
+        # If there are LLM tools, should see async def llm_a
         llm_tools = [t for t in agent.get_all_tools() if "llm" in t.name.lower()]
         if llm_tools:
-            assert "# llm" in definition_code  # Should have tool name mapping comments
+            assert "async def llm_a(" in definition_code  # Should have short name function
 
 
 class TestToolNamingWithMultipleTools:

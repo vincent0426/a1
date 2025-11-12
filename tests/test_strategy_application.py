@@ -42,7 +42,7 @@ class TestStrategyApplications:
         strategy = Strategy()
         
         assert strategy.max_iterations == 3
-        assert strategy.num_candidates == 1
+        assert strategy.num_candidates == 3  # Changed from 1 to 3
         assert strategy.min_candidates_for_comparison == 1
         assert strategy.accept_cost_threshold is None
         assert strategy.compare_cost_threshold is None
@@ -244,7 +244,7 @@ class TestRuntimeRespects:
         
         # Verify default strategy is used
         default_strategy = Strategy()
-        assert default_strategy.num_candidates == 1
+        assert default_strategy.num_candidates == 3  # Changed from 1 to 3
         assert default_strategy.max_iterations == 3
     
     @pytest.mark.asyncio

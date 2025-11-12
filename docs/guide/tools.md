@@ -1,0 +1,142 @@
+# Tools
+
+**Tools** are the actions agents can perform. They're regular async functions decorated with `@tool`.
+
+## Creating Tools
+
+```python
+from a1 import tool
+
+@tool(name="search", description="Search the web")
+async def search(query: str, limit: int = 10) -> List[str]:
+    """Search for information on the web."""
+    # Implementation
+    return results
+
+@tool(name="calculate", description="Evaluate a math expression")
+async def calculate(expression: str) -> float:
+    """Calculate the result of a math expression."""
+    return eval(expression)
+```
+
+## Tool Features
+
+### Type Safety
+
+Tools use Python type hints for validation:
+
+```python
+@tool(name="process", description="Process data")
+async def process(
+    data: List[str],
+    batch_size: int = 32
+) -> Dict[str, Any]:
+    ...
+```
+
+### Descriptions
+
+Descriptions help the LLM understand what tools do:
+
+```python
+@tool(
+    name="api_call",
+    description="Make an HTTP request to an endpoint"
+)
+async def api_call(url: str, method: str = "GET") -> str:
+    ...
+```
+
+### Return Types
+
+Tools support any return type:
+
+```python
+# Primitive returns
+@tool
+async def get_count() -> int:
+    return 42
+
+# Pydantic returns
+@tool
+async def get_person() -> PersonModel:
+    return PersonModel(name="Alice", age=30)
+
+# Complex types
+@tool
+async def search() -> List[Dict[str, Any]]:
+    return [{"id": 1, "name": "result"}]
+```
+
+## Built-in Tools
+
+A1 provides several built-in tools:
+
+### LLM
+
+Call language models:
+
+```python
+from a1 import LLM
+
+llm = LLM(model="gpt-4o")
+```
+
+### RAG
+
+Access data:
+
+```python
+from a1 import RAG
+
+# File system access
+rag = RAG(filesystem_path="/data")
+
+# Database access
+rag = RAG(dataframe=my_df)
+```
+
+### Done
+
+Mark workflow completion:
+
+```python
+from a1 import Done
+
+done = Done()
+```
+
+## ToolSets
+
+Group related tools:
+
+```python
+from a1 import ToolSet
+
+math_tools = ToolSet(
+    name="math",
+    description="Mathematical operations",
+    tools=[add, multiply, divide, subtract]
+)
+
+agent = Agent(
+    tools=[math_tools, LLM(model="gpt-4o")]
+)
+```
+
+## Errors and Validation
+
+Tools are automatically validated:
+
+```python
+try:
+    result = await tool(invalid_arg="wrong")
+except ValueError as e:
+    print(f"Validation error: {e}")
+```
+
+## Next Steps
+
+- Learn about [Agents](agents.md)
+- Understand [Compilation](compilation.md)
+- Explore [RAG](rag.md)

@@ -1,0 +1,51 @@
+# Installation
+
+## Requirements
+
+- Python 3.12 or higher
+- pip, uv, or poetry for package management
+
+## From PyPI
+
+The easiest way to get started is to install from PyPI:
+
+```bash
+pip install a1-compiler
+```
+
+Or with uv:
+
+```bash
+uv pip install a1-compiler
+```
+
+Or with poetry:
+
+```bash
+poetry add a1-compiler
+```
+
+## Development Installation
+
+To install from source for development:
+
+```bash
+git clone https://github.com/stanford-mast/a1.git
+cd a1
+uv sync
+```
+
+## Verify Installation
+
+Test that A1 is installed correctly:
+
+```python
+import a1
+print(f"a1-compiler {a1.__version__} installed!")
+```
+
+## Next Steps
+
+- Read the [Quick Start](quick-start.md) guide
+- Understand [Core Concepts](concepts.md)
+- Check out [examples](https://github.com/stanford-mast/a1/tree/main/examples)

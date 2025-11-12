@@ -1,0 +1,118 @@
+# Skills
+
+**Skills** are reusable, composable units of knowledge that agents can use.
+
+## What are Skills?
+
+Skills encapsulate domain knowledge, patterns, or procedures that agents can apply. They're similar to tools but focus on behavior and patterns rather than specific functions.
+
+## Creating Skills
+
+```python
+from a1 import Skill
+
+research_skill = Skill(
+    name="research",
+    description="Efficient web research methodology",
+    content="""
+    1. Search broadly first
+    2. Narrow down specific sources
+    3. Extract key information
+    4. Cross-reference findings
+    5. Summarize conclusions
+    """,
+    modules=["requests", "beautifulsoup4"]
+)
+```
+
+## SkillSets
+
+Group related skills:
+
+```python
+from a1 import SkillSet, Skill
+
+research_skills = SkillSet(
+    name="research",
+    description="All research-related skills",
+    skills=[
+        web_research_skill,
+        academic_research_skill,
+        data_analysis_skill,
+    ]
+)
+```
+
+## Using Skills with Agents
+
+```python
+from a1 import Agent, Skill, LLM
+
+researcher_skill = Skill(
+    name="researcher",
+    description="Research methodology",
+    content="...",
+    modules=[]
+)
+
+agent = Agent(
+    name="research_agent",
+    skills=[researcher_skill],
+    tools=[LLM(model="gpt-4o")],
+)
+```
+
+## Best Practices
+
+### Document Clearly
+
+Good skills have clear, actionable content:
+
+```python
+skill = Skill(
+    name="summarization",
+    description="How to write good summaries",
+    content="""
+    Key points for effective summaries:
+    - Identify main ideas (typically 3-5)
+    - Use bullet points
+    - Include specific numbers/facts
+    - Preserve original meaning
+    - Keep to 1/3 original length
+    """,
+    modules=[]
+)
+```
+
+### Organize Hierarchically
+
+Use SkillSets to organize complex skill collections:
+
+```python
+writing_skills = SkillSet(
+    name="writing",
+    skills=[
+        Skill(name="storytelling", description="..."),
+        Skill(name="technical_writing", description="..."),
+        Skill(name="summarization", description="..."),
+    ]
+)
+```
+
+### Include Required Modules
+
+Specify Python modules the skill needs:
+
+```python
+data_skill = Skill(
+    name="data_analysis",
+    description="...",
+    content="...",
+    modules=["pandas", "numpy", "scipy"]
+)
+```
+
+## Next Steps
+
+- Learn about [Agents](agents.md)
+- Create [Tools](tools.md)

@@ -60,14 +60,12 @@ class TestAgent:
             description="Test agent",
             input_schema=Input,
             output_schema=Output,
-            tools=[test_tool],
-            terminal_tools=["done"]
+            tools=[test_tool]
         )
         
         assert agent.name == "test_agent"
         assert agent.description == "Test agent"
         assert len(agent.tools) == 1
-        assert agent.terminal_tools == ["done"]
     
     def test_get_all_tools(self):
         """Test getting all tools from agent including toolsets."""

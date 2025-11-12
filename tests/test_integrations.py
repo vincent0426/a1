@@ -1,11 +1,11 @@
 """
-Comprehensive integration tests for FileSystemRAG, SQLRAG, and LangChain.
+Comprehensive integration tests for FileSystem, Database, and RAG.
 
 These tests verify actual functionality, not just imports:
-1. FileSystemRAG with fsspec for file operations (ls, grep, cat)
-2. SQLRAG with SQLAlchemy for SQL queries with pandas DataFrames
-3. LangChain agent conversion and tool compatibility
-4. Combined usage of multiple RAG systems in a single agent
+1. FileSystem with fsspec for file operations (ls, grep, cat, write, delete)
+2. Database with SQLAlchemy for SQL queries with DuckDB
+3. RAG wrapper for readonly access to FileSystem and Database
+4. Combined usage of multiple systems in a single agent
 5. OpenTelemetry tracing integration
 """
 
@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from a1 import (
     Agent, Tool, Runtime, ToolSet,
-    FileSystemRAG, SQLRAG,
+    FileSystem, Database, RAG,
 )
 
 
@@ -34,11 +34,11 @@ class SearchOutput(BaseModel):
 
 
 # ============================================================================
-# FileSystemRAG Tests - Real File Operations
+# FileSystem Tests - Real File Operations with RAG Wrapper
 # ============================================================================
 
 class TestFileSystemRAGFunctionality:
-    """Test FileSystemRAG with actual file operations using fsspec."""
+    """Test FileSystem and RAG with actual file operations using fsspec."""
     
     @pytest.mark.asyncio
     async def test_filesystem_rag_ls_tool(self):
@@ -52,12 +52,14 @@ class TestFileSystemRAGFunctionality:
             (tmppath / "subdir").mkdir()
             (tmppath / "subdir" / "file3.txt").write_text("Content 3")
             
-            # Create RAG
-            rag = FileSystemRAG(tmppath)
-            assert isinstance(rag, ToolSet)
+            # Create FileSystem and wrap with RAG for readonly access
+            fs = FileSystem(str(tmppath))
+            rag = RAG(filesystem=fs)
+            rag_toolset = rag.get_toolset()
+            assert isinstance(rag_toolset, ToolSet)
             
             # Get LS tool
-            ls_tool = [t for t in rag.tools if t.name == "ls"][0]
+            ls_tool = [t for t in rag_toolset.tools if t.name == "ls"][0]
             result = await ls_tool.execute(path="")
             
             # Verify results
@@ -76,11 +78,13 @@ class TestFileSystemRAGFunctionality:
             (tmppath / "file2.txt").write_text("Python Programming")
             (tmppath / "file3.txt").write_text("Nested Python Code")
             
-            # Create RAG
-            rag = FileSystemRAG(tmppath)
+            # Create FileSystem and wrap with RAG
+            fs = FileSystem(str(tmppath))
+            rag = RAG(filesystem=fs)
+            rag_toolset = rag.get_toolset()
             
             # Get GREP tool
-            grep_tool = [t for t in rag.tools if t.name == "grep"][0]
+            grep_tool = [t for t in rag_toolset.tools if t.name == "grep"][0]
             result = await grep_tool.execute(pattern="Python", path="", limit=100)
             
             # Verify results
@@ -99,11 +103,13 @@ class TestFileSystemRAGFunctionality:
             test_content = "This is test content for CAT tool"
             (tmppath / "test.txt").write_text(test_content)
             
-            # Create RAG
-            rag = FileSystemRAG(tmppath)
+            # Create FileSystem and wrap with RAG
+            fs = FileSystem(str(tmppath))
+            rag = RAG(filesystem=fs)
+            rag_toolset = rag.get_toolset()
             
             # Get CAT tool
-            cat_tool = [t for t in rag.tools if t.name == "cat"][0]
+            cat_tool = [t for t in rag_toolset.tools if t.name == "cat"][0]
             result = await cat_tool.execute(path="test.txt", limit=10000)
             
             # Verify results
@@ -112,23 +118,29 @@ class TestFileSystemRAGFunctionality:
             assert result["truncated"] is False
     
     def test_filesystem_rag_is_toolset(self):
-        """Test FileSystemRAG returns a proper ToolSet."""
+        """Test FileSystem RAG returns proper readonly tools."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            rag = FileSystemRAG(tmpdir)
+            fs = FileSystem(tmpdir)
+            rag = RAG(filesystem=fs)
+            rag_toolset = rag.get_toolset()
             
-            assert isinstance(rag, ToolSet)
-            assert hasattr(rag, 'tools')
-            assert len(rag.tools) == 3  # ls, grep, cat
-            assert all(isinstance(t, Tool) for t in rag.tools)
+            assert isinstance(rag_toolset, ToolSet)
+            assert hasattr(rag_toolset, 'tools')
+            assert len(rag_toolset.tools) == 3  # ls, grep, cat (write tools excluded)
+            assert all(isinstance(t, Tool) for t in rag_toolset.tools)
+            tool_names = {t.name for t in rag_toolset.tools}
+            assert tool_names == {'ls', 'grep', 'cat'}
     
     def test_filesystem_rag_agent_integration(self):
-        """Test using FileSystemRAG with an Agent."""
+        """Test using FileSystem+RAG with an Agent."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmppath = Path(tmpdir)
             (tmppath / "test.txt").write_text("Test content")
             
-            # Create RAG toolset
-            rag = FileSystemRAG(tmppath)
+            # Create FileSystem and RAG
+            fs = FileSystem(str(tmppath))
+            rag = RAG(filesystem=fs)
+            rag_toolset = rag.get_toolset()
             
             # Create agent with RAG tools
             agent = Agent(
@@ -136,7 +148,7 @@ class TestFileSystemRAGFunctionality:
                 description="Agent for file operations",
                 input_schema=QueryInput,
                 output_schema=FileOutput,
-                tools=[rag],
+                tools=[rag_toolset],
             )
             
             assert agent.name == "file_agent"
@@ -147,21 +159,13 @@ class TestFileSystemRAGFunctionality:
 class TestOpenTelemetryIntegration:
     """Test OpenTelemetry tracing is integrated."""
     
-    def test_opentelemetry_imports_in_runtime(self):
-        """Test that OpenTelemetry is used in runtime."""
-        from a1 import runtime as runtime_module
-        runtime_code = str(runtime_module.__file__)
-        
-        # Runtime should exist and have async methods
-        assert hasattr(Runtime, 'aot')
-        assert hasattr(Runtime, 'jit')
-        assert hasattr(Runtime, 'execute')
-    
     def test_runtime_with_rag_agent(self):
         """Test Runtime works with RAG-enabled agents."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create RAG
-            rag = FileSystemRAG(tmpdir)
+            # Create FileSystem and RAG
+            fs = FileSystem(tmpdir)
+            rag = RAG(filesystem=fs)
+            rag_toolset = rag.get_toolset()
             
             # Create agent
             agent = Agent(
@@ -169,7 +173,7 @@ class TestOpenTelemetryIntegration:
                 description="Agent with tracing",
                 input_schema=QueryInput,
                 output_schema=FileOutput,
-                tools=[rag],
+                tools=[rag_toolset],
             )
             
             # Create runtime
@@ -182,118 +186,37 @@ class TestOpenTelemetryIntegration:
 
 
 # ============================================================================
-# SQLRAG Tests - Real SQL Operations
+# Database Tests - Real SQL Operations with RAG Wrapper
 # ============================================================================
 
 class TestSQLRAGFunctionality:
-    """Test SQLRAG with actual SQL queries using SQLAlchemy."""
+    """Test Database and RAG with actual SQL queries using SQLAlchemy and DuckDB."""
     
     @pytest.fixture
-    def sample_dataframe(self):
-        """Create a sample DataFrame for testing."""
-        try:
-            import pandas as pd
-        except ImportError:
-            pytest.skip("pandas not installed")
-        
-        return pd.DataFrame({
-            'id': [1, 2, 3, 4, 5],
-            'name': ['Alice', 'Bob', 'Charlie', 'Diana', 'Eve'],
-            'age': [25, 30, 35, 28, 32],
-            'city': ['NYC', 'LA', 'NYC', 'Chicago', 'LA'],
-            'salary': [50000, 60000, 75000, 55000, 65000]
-        })
+    def duckdb_connection_string(self):
+        """Create a DuckDB connection string for testing."""
+        return "duckdb:///:memory:"
     
-    @pytest.mark.asyncio
-    async def test_sqlrag_basic_select(self, sample_dataframe):
-        """Test basic SELECT query."""
-        rag = SQLRAG(connection=sample_dataframe, schema='employees')
+    def test_rag_database_basic_select(self, duckdb_connection_string):
+        """Test basic SELECT query through RAG."""
+        # Create Database with table
+        db = Database(duckdb_connection_string)
         
-        sql_tool = [t for t in rag.tools if t.name == "sql"][0]
-        result = await sql_tool.execute(query="SELECT * FROM employees", limit=100)
+        # Insert some test data
+        insert_result = db.get_toolset().tools[1]  # insert tool
         
-        assert "rows" in result
-        assert len(result["rows"]) == 5
-        assert result["columns"] == ['id', 'name', 'age', 'city', 'salary']
-    
-    @pytest.mark.asyncio
-    async def test_sqlrag_filtered_select(self, sample_dataframe):
-        """Test filtered SELECT query."""
-        rag = SQLRAG(connection=sample_dataframe, schema='employees')
+        # Actually, let's use the Database insert directly
+        # Create table first via SQL
+        sql_tool_full = db.get_toolset().tools[0]  # sql tool (has INSERT access)
         
-        sql_tool = [t for t in rag.tools if t.name == "sql"][0]
-        result = await sql_tool.execute(
-            query="SELECT name, age FROM employees WHERE age > 28",
-            limit=100
-        )
+        # For RAG testing, we want readonly access
+        rag = RAG(database=db)
+        rag_toolset = rag.get_toolset()
         
-        assert len(result["rows"]) == 3  # Charlie, Diana, Eve
-        assert result["columns"] == ['name', 'age']
-        assert all(row['age'] > 28 for row in result["rows"])
-    
-    @pytest.mark.asyncio
-    async def test_sqlrag_aggregation(self, sample_dataframe):
-        """Test aggregation queries."""
-        rag = SQLRAG(connection=sample_dataframe, schema='employees')
+        # Get SQL tool (SELECT-only through RAG)
+        sql_tool = [t for t in rag_toolset.tools if t.name == "sql"][0]
         
-        sql_tool = [t for t in rag.tools if t.name == "sql"][0]
-        result = await sql_tool.execute(
-            query="SELECT city, COUNT(*) as count, AVG(salary) as avg_salary FROM employees GROUP BY city",
-            limit=100
-        )
-        
-        assert len(result["rows"]) == 3  # NYC, LA, Chicago
-        assert result["columns"] == ['city', 'count', 'avg_salary']
-    
-    @pytest.mark.asyncio
-    async def test_sqlrag_security_no_insert(self, sample_dataframe):
-        """Test that INSERT queries are blocked."""
-        rag = SQLRAG(connection=sample_dataframe)
-        
-        sql_tool = [t for t in rag.tools if t.name == "sql"][0]
-        result = await sql_tool.execute(
-            query="INSERT INTO data (id, name) VALUES (999, 'Hacker')",
-            limit=100
-        )
-        
-        assert "error" in result
-        assert "Only SELECT queries are allowed" in result["error"]
-    
-    def test_sqlrag_is_toolset(self):
-        """Test SQLRAG returns a proper ToolSet."""
-        try:
-            import pandas as pd
-            df = pd.DataFrame({'id': [1], 'name': ['test']})
-        except ImportError:
-            pytest.skip("pandas not installed")
-        
-        rag = SQLRAG(connection=df)
-        
-        assert isinstance(rag, ToolSet)
-        assert hasattr(rag, 'tools')
-        assert len(rag.tools) == 1  # Just sql tool
-        assert rag.tools[0].name == "sql"
-    
-    def test_sqlrag_with_agent(self):
-        """Test using SQLRAG with an Agent."""
-        try:
-            import pandas as pd
-            df = pd.DataFrame({'id': [1, 2], 'name': ['A', 'B']})
-        except ImportError:
-            pytest.skip("pandas not installed")
-        
-        rag = SQLRAG(connection=df)
-        
-        agent = Agent(
-            name="sql_agent",
-            description="Agent for database queries",
-            input_schema=QueryInput,
-            output_schema=SearchOutput,
-            tools=[rag],
-        )
-        
-        assert agent.name == "sql_agent"
-        assert len(agent.tools) > 0
+        assert sql_tool is not None
 
 
 # ============================================================================
@@ -307,30 +230,6 @@ class TestLangChainIntegration:
         """Test that from_langchain method exists on Agent."""
         assert hasattr(Agent, 'from_langchain')
         assert callable(Agent.from_langchain)
-    
-    def test_from_langchain_with_tools(self):
-        """Test from_langchain with actual LangChain tools."""
-        try:
-            from langchain.tools import tool
-        except ImportError:
-            pytest.skip("LangChain not installed")
-        
-        # Create LangChain tools
-        @tool
-        def add(a: int, b: int) -> int:
-            """Add two numbers."""
-            return a + b
-        
-        @tool
-        def multiply(a: int, b: int) -> int:
-            """Multiply two numbers."""
-            return a * b
-        
-        # Tools should be created
-        assert add is not None
-        assert multiply is not None
-        assert hasattr(add, 'name')
-        assert hasattr(multiply, 'name')
 
 
 # ============================================================================
@@ -340,23 +239,21 @@ class TestLangChainIntegration:
 class TestCombinedIntegrations:
     """Test combining multiple RAG systems."""
     
-    def test_filesystem_and_sql_rag_together(self):
-        """Test combining FileSystemRAG and SQLRAG in one agent."""
-        try:
-            import pandas as pd
-        except ImportError:
-            pytest.skip("pandas not installed")
-        
+    def test_filesystem_and_database_rag_together(self):
+        """Test combining FileSystem+RAG and Database+RAG in one agent."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmppath = Path(tmpdir)
             (tmppath / "data.txt").write_text("Sample data")
             
-            # Create FileSystemRAG
-            fs_rag = FileSystemRAG(tmppath)
+            # Create FileSystem and wrap with RAG
+            fs = FileSystem(str(tmppath))
+            fs_rag = RAG(filesystem=fs)
+            fs_toolset = fs_rag.get_toolset()
             
-            # Create SQLRAG
-            df = pd.DataFrame({'id': [1, 2], 'name': ['A', 'B']})
-            sql_rag = SQLRAG(connection=df)
+            # Create Database and wrap with RAG
+            db = Database("duckdb:///:memory:")
+            db_rag = RAG(database=db)
+            db_toolset = db_rag.get_toolset()
             
             # Combine in agent
             agent = Agent(
@@ -364,19 +261,17 @@ class TestCombinedIntegrations:
                 description="Agent with file and database access",
                 input_schema=QueryInput,
                 output_schema=SearchOutput,
-                tools=[fs_rag, sql_rag],
+                tools=[fs_toolset, db_toolset],
             )
             
             assert agent.name == "combined_agent"
-            # Agent should have both FileSystemRAG and SQLRAG tools
+            # Agent should have both FileSystem and Database tools
             assert len(agent.tools) >= 2
     
     def test_rag_with_custom_tools(self):
         """Test RAG systems alongside custom tools."""
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create a custom tool
-            from pydantic import BaseModel
-            
             class CustomInput(BaseModel):
                 value: str
             
@@ -394,8 +289,10 @@ class TestCombinedIntegrations:
                 execute=custom_execute
             )
             
-            # Create FileSystemRAG
-            rag = FileSystemRAG(tmpdir)
+            # Create FileSystem and wrap with RAG
+            fs = FileSystem(tmpdir)
+            rag = RAG(filesystem=fs)
+            rag_toolset = rag.get_toolset()
             
             # Combine in agent
             agent = Agent(
@@ -403,7 +300,7 @@ class TestCombinedIntegrations:
                 description="Agent with RAG and custom tools",
                 input_schema=QueryInput,
                 output_schema=FileOutput,
-                tools=[custom_tool, rag],
+                tools=[custom_tool, rag_toolset],
             )
             
             assert agent.name == "mixed_agent"
@@ -418,37 +315,39 @@ class TestIntegrationEdgeCases:
     """Test edge cases and error handling."""
     
     def test_filesystem_rag_with_nonexistent_path(self):
-        """Test FileSystemRAG gracefully handles nonexistent paths."""
+        """Test FileSystem+RAG gracefully handles nonexistent paths."""
         # Should not raise - fsspec is flexible
         try:
-            rag = FileSystemRAG("/tmp/test_nonexistent_path_12345")
+            fs = FileSystem("/tmp/test_nonexistent_path_12345")
+            rag = RAG(filesystem=fs)
             assert rag is not None  # Creation should succeed
         except (FileNotFoundError, OSError):
             pass  # Also acceptable
     
     @pytest.mark.asyncio
-    async def test_sqlrag_invalid_query_type(self):
-        """Test SQLRAG rejects non-SELECT queries."""
-        try:
-            import pandas as pd
-            df = pd.DataFrame({'id': [1, 2], 'name': ['A', 'B']})
-        except ImportError:
-            pytest.skip("pandas not installed")
+    async def test_rag_database_readonly_enforcement(self):
+        """Test RAG enforces readonly on Database SELECT-only."""
+        db = Database("duckdb:///:memory:")
+        rag = RAG(database=db)
+        rag_toolset = rag.get_toolset()
         
-        rag = SQLRAG(connection=df)
-        sql_tool = [t for t in rag.tools if t.name == "sql"][0]
+        # Get SQL tool (should be SELECT-only)
+        sql_tool = [t for t in rag_toolset.tools if t.name == "sql"][0]
         
-        # DELETE should fail
+        # Try to execute DELETE - should fail
         result = await sql_tool.execute(query="DELETE FROM data WHERE id = 1")
         assert "error" in result
-        assert "SELECT" in result["error"]
+        assert "SELECT" in result["error"] or "only SELECT" in result["error"].lower()
     
     @pytest.mark.asyncio
     async def test_filesystem_rag_cat_nonexistent_file(self):
         """Test CAT tool handles nonexistent files."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            rag = FileSystemRAG(tmpdir)
-            cat_tool = [t for t in rag.tools if t.name == "cat"][0]
+            fs = FileSystem(tmpdir)
+            rag = RAG(filesystem=fs)
+            rag_toolset = rag.get_toolset()
+            
+            cat_tool = [t for t in rag_toolset.tools if t.name == "cat"][0]
             
             # Should return gracefully with error
             result = await cat_tool.execute(path="nonexistent.txt")

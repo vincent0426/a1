@@ -1,0 +1,252 @@
+# RAG (Retrieval-Augmented Generation)
+
+**RAG** tools provide agents access to external knowledge sources - files, databases, etc.
+
+A1 provides a **composition-based architecture** for RAG:
+
+- **FileSystem**: Full read/write access to files
+- **Database**: Full read/write access to databases  
+- **RAG**: Readonly wrapper that filters write operations
+
+This allows code generation to have write access during development, while production agents get readonly access for safety.
+
+## FileSystem
+
+Access local or cloud files via `fsspec`:
+
+```python
+from a1 import FileSystem
+
+# Create filesystem accessor
+fs = FileSystem("/data")
+
+# Full toolset (includes write access)
+toolset = fs.get_toolset()  # Returns: ls, grep, cat, write_file, delete_file
+
+# Use in agent (for testing/development)
+agent = Agent(
+    name="research_agent",
+    tools=[fs.get_toolset(), LLM(model="gpt-4o")],
+)
+```
+
+### Available Tools
+
+```python
+fs = FileSystem("/data")
+
+# List files (read-only)
+ls_result = await tool_ls(path="")
+
+# Search files (read-only)  
+grep_result = await tool_grep(pattern="search_term", path="", limit=100)
+
+# Read file (read-only)
+cat_result = await tool_cat(path="file.txt", limit=10000)
+
+# Write file (write access)
+write_result = await tool_write_file(path="output.txt", content="data")
+
+# Delete file (write access)
+delete_result = await tool_delete_file(path="temp.txt")
+```
+
+### Path Support
+
+Works with local and cloud storage:
+
+```python
+from a1 import FileSystem
+
+# Local
+fs = FileSystem("/local/path")
+
+# S3
+fs = FileSystem("s3://bucket/path")
+
+# Google Cloud Storage
+fs = FileSystem("gs://bucket/path")
+
+# Azure Blob Storage
+fs = FileSystem("az://container/path")
+```
+
+## Database
+
+Query databases via SQLAlchemy connection strings:
+
+```python
+from a1 import Database
+
+# Create database accessor  
+db = Database("sqlite:///data.db")
+
+# Full toolset (includes write access)
+toolset = db.get_toolset()  # Returns: sql, insert, update, delete
+
+# Use in agent (for testing/development)
+agent = Agent(
+    name="data_agent",
+    tools=[db.get_toolset(), LLM(model="gpt-4o")],
+)
+```
+
+### Available Tools
+
+```python
+db = Database("sqlite:///data.db")
+
+# SQL queries (includes SELECT, INSERT, UPDATE, DELETE)
+result = await tool_sql(query="SELECT * FROM users", limit=100)
+
+# Insert rows
+result = await tool_insert(
+    query="INSERT INTO users (name, age) VALUES (:name, :age)",
+    rows=[{"name": "Alice", "age": 30}]
+)
+
+# Update rows
+result = await tool_update(
+    query="UPDATE users SET age = 31 WHERE name = 'Alice'"
+)
+
+# Delete rows
+result = await tool_delete(query="DELETE FROM users WHERE age < 18")
+```
+
+### Supported Databases
+
+Any database supported by SQLAlchemy:
+
+```python
+# PostgreSQL
+db = Database("postgresql://user:pass@localhost/dbname")
+
+# MySQL  
+db = Database("mysql+pymysql://user:pass@localhost/dbname")
+
+# SQLite
+db = Database("sqlite:///path/to/database.db")
+
+# DuckDB
+db = Database("duckdb:///data.duckdb")
+
+# SQL Server
+db = Database("mssql+pyodbc://user:pass@server/dbname")
+
+# Oracle
+db = Database("oracle+cx_oracle://user:pass@localhost:1521/dbname")
+```
+
+## RAG - Readonly Wrapper
+
+For production safety, wrap FileSystem or Database with RAG to enforce readonly access:
+
+```python
+from a1 import FileSystem, Database, RAG
+
+# Wrap FileSystem for readonly
+fs = FileSystem("/data")
+rag_fs = RAG(filesystem=fs)
+readonly_toolset = rag_fs.get_toolset()  # Returns: ls, grep, cat only
+
+# Wrap Database for readonly (SELECT-only)
+db = Database("sqlite:///data.db")
+rag_db = RAG(database=db)
+readonly_toolset = rag_db.get_toolset()  # Returns: sql (SELECT-only)
+
+# Use in production agent
+agent = Agent(
+    name="safe_agent",
+    tools=[readonly_toolset, LLM(model="gpt-4o")],
+)
+```
+
+### Security Model
+
+RAG enforces readonly access:
+
+```python
+# Development agent - full write access
+dev_db = Database("sqlite:///dev.db")
+dev_toolset = dev_db.get_toolset()
+
+# Production agent - readonly access
+prod_db = Database("sqlite:///prod.db")  
+rag_db = RAG(database=prod_db)
+prod_toolset = rag_db.get_toolset()
+
+# prod_toolset only has SELECT tool
+# INSERT, UPDATE, DELETE are not available
+# This prevents accidental data modification
+```
+
+## Combined Usage
+
+Agents can access both files and databases:
+
+```python
+from a1 import FileSystem, Database, RAG, Agent, LLM
+
+# Create accessors
+fs = FileSystem("/data")
+db = Database("sqlite:///analytics.db")
+
+# Wrap for readonly in production
+rag_fs = RAG(filesystem=fs)
+rag_db = RAG(database=db)
+
+# Combine in agent
+agent = Agent(
+    name="analytics_agent",
+    description="Analyzes data from files and database",
+    tools=[
+        rag_fs.get_toolset(),
+        rag_db.get_toolset(),
+        LLM(model="gpt-4o")
+    ],
+)
+```
+
+## Example: Knowledge Base Agent
+
+```python
+from a1 import Agent, FileSystem, Database, RAG, LLM
+from pydantic import BaseModel
+
+class QueryInput(BaseModel):
+    question: str
+
+class QueryOutput(BaseModel):
+    answer: str
+    sources: list[str]
+
+# Setup knowledge base
+fs = FileSystem("/knowledge")
+db = Database("sqlite:///docs.db")
+
+rag_fs = RAG(filesystem=fs)
+rag_db = RAG(database=db)
+
+# Create agent
+agent = Agent(
+    name="knowledge_agent",
+    description="Answers questions using knowledge base",
+    input_schema=QueryInput,
+    output_schema=QueryOutput,
+    tools=[
+        rag_fs.get_toolset(),
+        rag_db.get_toolset(),
+        LLM(model="gpt-4o"),
+    ],
+)
+
+# Execute
+result = await agent.jit(question="What is machine learning?")
+```
+
+## Next Steps
+
+- Learn about [Skills](skills.md)
+- Create [Tools](tools.md)
+- Explore [Agents](agents.md)

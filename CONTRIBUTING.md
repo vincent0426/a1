@@ -1,13 +1,13 @@
-# Contributing to a1
+# Contributing to A1
 
-Thank you for your interest in contributing to a1! This document provides guidelines and instructions for contributing.
+Thank you for your interest in contributing to A1! This document provides guidelines and instructions for contributing.
 
 ## Development Setup
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/yourusername/a1
-   cd a1
+   git clone https://github.com/yourusername/A1
+   cd A1
    ```
 
 2. **Install uv (if not already installed):**
@@ -36,7 +36,7 @@ Thank you for your interest in contributing to a1! This document provides guidel
 uv run pytest
 
 # Run with coverage
-uv run pytest --cov=a1 --cov-report=html
+uv run pytest --cov=A1 --cov-report=html
 
 # Run specific test file
 uv run pytest tests/test_models.py
@@ -63,7 +63,7 @@ uv run ruff check --fix .
 We use `mypy` for type checking:
 
 ```bash
-uv run mypy src/a1
+uv run mypy src/A1
 ```
 
 ### Running Examples
@@ -141,7 +141,7 @@ async def my_function(param1: str, param2: int = 10) -> Optional[str]:
 
 ```python
 import pytest
-from a1 import tool
+from A1 import tool
 
 class TestTool:
     """Test Tool functionality."""
@@ -211,4 +211,4 @@ Maintainers will handle releases:
 
 ## License
 
-By contributing to a1, you agree that your contributions will be licensed under the MIT License.
+By contributing to A1, you agree that your contributions will be licensed under the MIT License.

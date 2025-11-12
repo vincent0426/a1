@@ -237,13 +237,21 @@ class IsLoop(Verify):
     When this verifier is present, the Runtime.aot() method can skip
     LLM generation and use a templated loop instead.
     
-    Expected pattern:
+    Accepts two patterns:
+    
+    1. Legacy pattern (explicit while loop):
     ```python
     while <condition>:
         result = await llm(...)
         if <terminal_condition>:
             break
     ```
+    
+    2. New pattern (LLM handles looping internally):
+    ```python
+    output = await llm(..., output_schema=...)
+    ```
+    The LLM tool internally loops until a terminal tool is called.
     """
     
     def verify(self, code, agent: Any) -> Tuple[bool, Optional[str]]:
@@ -256,10 +264,14 @@ class IsLoop(Verify):
         except SyntaxError:
             return False, "Invalid syntax"
         
-        # Look for while loop with LLM call and break condition
+        # Check for either pattern:
+        # 1. Legacy: while loop with LLM call and break
+        # 2. New: LLM call with output_schema parameter (LLM handles looping)
+        
         has_while_loop = False
         has_llm_call = False
         has_break = False
+        has_llm_with_output_schema = False
         
         for node in ast.walk(tree):
             # Check for while loop (any condition, not just True)
@@ -270,27 +282,38 @@ class IsLoop(Verify):
             if isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Name):
                     func_name = node.func.id.lower()
-                    if 'llm' in func_name or 'gpt' in func_name or 'openai' in func_name:
-                        has_llm_call = True
+                    is_llm_call = 'llm' in func_name or 'gpt' in func_name or 'openai' in func_name
                 elif isinstance(node.func, ast.Attribute):
                     attr_name = node.func.attr.lower()
-                    if 'llm' in attr_name or 'gpt' in attr_name:
-                        has_llm_call = True
+                    is_llm_call = 'llm' in attr_name or 'gpt' in attr_name
+                else:
+                    is_llm_call = False
+                
+                if is_llm_call:
+                    has_llm_call = True
+                    # Check if this LLM call has output_schema keyword argument
+                    for keyword in node.keywords:
+                        if keyword.arg == 'output_schema':
+                            has_llm_with_output_schema = True
+                            break
             
             # Check for break
             if isinstance(node, ast.Break):
                 has_break = True
         
-        if has_while_loop and has_llm_call and has_break:
+        # Accept if:
+        # 1. New pattern: LLM call with output_schema (LLM handles looping internally)
+        # 2. Legacy pattern: while loop with LLM call and break
+        if has_llm_with_output_schema:
+            return True, None
+        elif has_while_loop and has_llm_call and has_break:
             return True, None
         else:
             missing = []
-            if not has_while_loop:
-                missing.append("while loop")
             if not has_llm_call:
                 missing.append("LLM call")
-            if not has_break:
-                missing.append("break statement")
+            elif not has_llm_with_output_schema and not has_break:
+                missing.append("break statement (legacy pattern) or output_schema parameter (new pattern)")
             return False, f"Not a standard agentic loop pattern (missing: {', '.join(missing)})"
 
 
@@ -390,15 +413,24 @@ def check_dangerous_ops(code: str) -> Tuple[bool, Optional[str]]:
 
 class IsFunction(Verify):
     """
-    Verify that code contains at least one async function definition that's not a stub.
+    Verify that code contains exactly one async function with correct signature.
     
-    Used by AOT mode to ensure generated code is a proper function.
-    Extracts function metadata (name, args, return type) for validation.
-    Ignores stub functions that raise NotImplementedError.
+    Used by AOT mode to ensure generated code:
+    1. Contains exactly one async function (not a stub)
+    2. Function name matches agent.name
+    3. Parameters match agent.input_schema fields (names and order)
+    4. Return type matches agent.output_schema
+    5. No code exists outside the function definition
+    
+    Args passed via kwargs:
+        agent: Agent instance with name, input_schema, output_schema
     """
     
     def verify(self, code, **kwargs) -> tuple[bool, Optional[str]]:
-        """Check if code has at least one async function (not a stub) and extract metadata."""
+        """Check if code has exactly one async function with correct signature."""
+        # Extract agent from kwargs
+        agent = kwargs.get('agent')
+        
         # Extract just the generated code (not definition code)
         generated_code = self._extract_code(code)
         
@@ -428,12 +460,29 @@ class IsFunction(Verify):
         if len(func_defs) == 0:
             return False, "No async function implementation found. AOT mode requires a function (stubs don't count)."
         
+        # Check that there's only one function definition
+        if len(func_defs) > 1:
+            func_names = [f.name for f in func_defs]
+            return False, f"Multiple function definitions found: {func_names}. AOT mode requires exactly one function."
+        
+        # Get the single function
+        func_def = func_defs[0]
+        
         # Check that the function is async (should always be true here)
-        func_def = func_defs[0]  # Use the first non-stub function
         if not isinstance(func_def, ast.AsyncFunctionDef):
             return False, "Function must be async (use 'async def')"
         
-        # Extract metadata for validation
+        # Check that there's no code outside the function
+        non_func_nodes = [node for node in tree.body if not isinstance(node, ast.AsyncFunctionDef)]
+        # Allow imports at the top
+        non_import_nodes = [
+            node for node in non_func_nodes 
+            if not isinstance(node, (ast.Import, ast.ImportFrom))
+        ]
+        if non_import_nodes:
+            return False, f"Found code outside the function definition. AOT mode requires ONLY the function, no extra code."
+        
+        # Extract metadata
         func_name = func_def.name
         func_args = [arg.arg for arg in func_def.args.args]
         
@@ -449,6 +498,24 @@ class IsFunction(Verify):
         import logging
         logger = logging.getLogger(__name__)
         logger.debug(f"Function metadata - name: {func_name}, args: {func_args}, return: {return_annotation}")
+        
+        # Validate against agent schema if provided
+        if agent:
+            # Validate function name
+            if func_name != agent.name:
+                return False, f"Function name '{func_name}' doesn't match agent name '{agent.name}'"
+            
+            # Validate parameters match input schema
+            if hasattr(agent.input_schema, 'model_fields'):
+                expected_params = list(agent.input_schema.model_fields.keys())
+                if func_args != expected_params:
+                    return False, f"Function parameters {func_args} don't match input schema fields {expected_params}"
+            
+            # Validate return type matches output schema
+            if hasattr(agent.output_schema, '__name__'):
+                expected_return = agent.output_schema.__name__
+                if return_annotation != expected_return:
+                    return False, f"Return type annotation '{return_annotation}' doesn't match output schema '{expected_return}'"
         
         return True, None
 

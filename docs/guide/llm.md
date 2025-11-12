@@ -1,0 +1,240 @@
+# LLM Integration
+
+LLM tools allow agents to call language models with structured input/output and built-in retry logic.
+
+## Basic Usage
+
+```python
+from a1 import LLM, Agent
+
+# Create an LLM tool
+llm = LLM("groq:openai/gpt-oss-20b")
+
+# Use in an agent
+agent = Agent(
+    name="writer",
+    description="Writes content",
+    input_schema=Input,
+    output_schema=Output,
+    tools=[llm]
+)
+```
+
+## Type Safety
+
+LLM tools are **fully typed** with Pydantic schemas:
+
+```python
+from pydantic import BaseModel, Field
+
+class MathProblem(BaseModel):
+    question: str = Field(..., description="Math question to solve")
+
+class MathAnswer(BaseModel):
+    answer: float = Field(..., description="Numerical answer")
+    explanation: str = Field(..., description="Step-by-step explanation")
+
+# Typed LLM tool
+llm = LLM(
+    model="groq:openai/gpt-oss-20b",
+    input_schema=MathProblem,  # Optional: validates input
+    output_schema=MathAnswer   # Optional: structured output
+)
+```
+
+## Retry Strategy
+
+By default, LLM tools use **RetryStrategy with 3 parallel candidates and 3 retries each**:
+
+```python
+from a1 import LLM, RetryStrategy
+
+# Default: 3 candidates × 3 retries = up to 9 attempts
+llm = LLM("groq:openai/gpt-oss-20b")
+
+# Custom retry configuration
+llm = LLM(
+    model="groq:openai/gpt-oss-20b",
+    retry_strategy=RetryStrategy(
+        max_iterations=5,      # Retries per candidate
+        num_candidates=2       # Parallel candidates
+    )
+)
+```
+
+### How Retry Works
+
+When an LLM call with `output_schema` fails validation:
+
+1. **Initial attempt**: Try to validate the first response (candidate 0, iteration 0)
+2. **Parallel candidates**: Launch `num_candidates` parallel validation attempts
+3. **Per-candidate retries**: Each candidate retries up to `max_iterations` times
+4. **First success wins**: Returns immediately when any candidate succeeds
+5. **Graceful degradation**: Returns raw string if all attempts fail
+
+Example log output:
+```
+INFO: Initial validation failed. Trying 3 candidates with 3 iterations each...
+INFO: Candidate 0 iteration 0: Validation failed, retrying...
+INFO: Candidate 1 iteration 0: Successfully validated
+INFO: Got successful validation from one of 3 candidates
+```
+
+## Structured Output
+
+LLM tools support JSON schema-based structured output:
+
+```python
+from pydantic import BaseModel
+
+class ParsedData(BaseModel):
+    entities: List[str]
+    sentiment: str
+    confidence: float
+
+# LLM will return ParsedData instance
+llm = LLM("groq:openai/gpt-oss-20b", output_schema=ParsedData)
+
+# In generated code or runtime execution:
+result = await llm.execute(
+    content="Analyze: The product is amazing!",
+    output_schema=ParsedData
+)
+# result is ParsedData(entities=[...], sentiment="positive", confidence=0.95)
+```
+
+## Function Calling
+
+LLM tools support multi-provider function calling:
+
+```python
+from a1 import Agent, LLM, tool
+
+@tool(name="search", description="Search the web")
+async def search(query: str) -> str:
+    return f"Results for: {query}"
+
+# Agent with LLM + tools
+agent = Agent(
+    name="researcher",
+    input_schema=Question,
+    output_schema=Answer,
+    tools=[
+        search,
+        LLM("groq:openai/gpt-oss-20b")
+    ]
+)
+
+# Generated code can call tools via LLM:
+# result = await llm(content="Search for Python tutorials", tools=[search])
+```
+
+## Provider Support
+
+Supported providers (via `any-llm` SDK):
+
+- **OpenAI**: `gpt-4o`, `gpt-4.1`, `gpt-4o-mini`
+- **Anthropic**: `claude-sonnet-4`, `claude-haiku-4-5`
+- **Google**: `gemini-2.0-flash`, `gemini-pro`
+- **Groq**: `groq:llama-3.3-70b`, `groq:openai/gpt-oss-20b`
+
+Prefix with provider name if ambiguous:
+```python
+llm = LLM("groq:openai/gpt-oss-20b")  # Groq-hosted model
+llm = LLM("anthropic:claude-sonnet-4")  # Anthropic
+```
+
+## Serialization
+
+LLM tools can be serialized and deserialized:
+
+```python
+import json
+
+llm = LLM("groq:openai/gpt-oss-20b")
+
+# Serialize
+llm_dict = {
+    "type": "llm",
+    "model": "groq:openai/gpt-oss-20b",
+    "retry_strategy": {
+        "max_iterations": 3,
+        "num_candidates": 3
+    }
+}
+
+# Deserialize
+llm = LLM(
+    model=llm_dict["model"],
+    retry_strategy=RetryStrategy(**llm_dict["retry_strategy"])
+)
+```
+
+## Context Tracking
+
+LLM calls automatically append to context:
+
+- **User messages**: Input prompts
+- **Assistant messages**: LLM responses
+- **Tool messages**: Function call results
+
+```python
+from a1 import get_context
+
+# After LLM execution
+ctx = get_context("main")
+print(f"Messages in context: {len(ctx)}")
+for msg in ctx:
+    print(f"{msg.role}: {msg.content[:50]}...")
+```
+
+See [Context & History](context.md) for details on when messages are appended.
+
+## Best Practices
+
+### 1. Use Structured Output for Reliability
+```python
+# ❌ Unreliable parsing
+llm = LLM("groq:openai/gpt-oss-20b")
+response = await llm.execute("Give me JSON")
+data = json.loads(response)  # May fail!
+
+# ✅ Type-safe structured output
+class Output(BaseModel):
+    data: dict
+
+llm = LLM("groq:openai/gpt-oss-20b", output_schema=Output)
+result = await llm.execute("Give me data")  # Returns Output instance
+```
+
+### 2. Tune Retry Strategy for Reliability
+```python
+# For critical tasks: more retries
+critical_llm = LLM(
+    "groq:openai/gpt-oss-20b",
+    retry_strategy=RetryStrategy(max_iterations=5, num_candidates=5)
+)
+
+# For fast tasks: fewer retries
+fast_llm = LLM(
+    "groq:openai/gpt-oss-20b",
+    retry_strategy=RetryStrategy(max_iterations=1, num_candidates=1)
+)
+```
+
+### 3. Use Type Hints in Schemas
+```python
+class Input(BaseModel):
+    query: str = Field(..., description="Clear description helps LLM")
+    max_length: Optional[int] = Field(None, description="Optional fields supported")
+
+class Output(BaseModel):
+    result: str
+    confidence: float = Field(..., ge=0.0, le=1.0)  # Validators enforced
+```
+
+## See Also
+
+- [Agents](agents.md) - Using LLMs in agents
+- [Retry & Validation](../advanced/retry.md) - Advanced retry configuration
+- [Context & History](context.md) - Message tracking

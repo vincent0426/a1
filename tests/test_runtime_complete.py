@@ -127,12 +127,13 @@ async def test_runtime_execute_llm_tool(calculator_tool):
     assert ctx.messages[0].role == "user"
     assert ctx.messages[0].content == "What is 12 times 8?"
     
-    # LLM should have called the calculator tool or responded
-    if hasattr(result, "tools_called") and result.tools_called:
-        print(f"Tools called: {result.tools_called}")
-        assert len(result.tools_called) > 0
+    # LLM returns an LLMOutput object with content field
+    from a1.llm import LLMOutput
+    if isinstance(result, LLMOutput):
+        print(f"LLM returned content: {result.content}")
+        assert result.content  # Should have some content
     else:
-        # Direct string response
+        # Direct string response (shouldn't happen with current implementation)
         assert isinstance(result, str)
         print(f"Direct response: {result}")
 
@@ -223,7 +224,7 @@ async def test_runtime_aot_with_isloop(calculator_tool, temp_cache_dir):
 @pytest.mark.asyncio
 async def test_runtime_aot_without_isloop(calculator_tool, temp_cache_dir):
     """Test Runtime.aot without IsLoop - should use LLM to generate code."""
-    runtime = Runtime()
+    runtime = Runtime(cache_dir=temp_cache_dir)
     runtime.verify = []  # No IsLoop verifier
     # Check BaseGenerate signature - it might not take llm parameter
     set_runtime(runtime)
@@ -268,7 +269,7 @@ async def test_runtime_aot_without_isloop(calculator_tool, temp_cache_dir):
 @pytest.mark.asyncio
 async def test_runtime_aot_with_caching(calculator_tool, temp_cache_dir):
     """Test Runtime.aot with caching enabled."""
-    runtime = Runtime()
+    runtime = Runtime(cache_dir=temp_cache_dir)
     runtime.verify = [IsLoop()]
     set_runtime(runtime)
     llm_tool = LLM("groq:openai/gpt-oss-20b")
@@ -313,7 +314,7 @@ async def test_runtime_aot_with_caching(calculator_tool, temp_cache_dir):
 @pytest.mark.asyncio
 async def test_context_parameter_in_generated_code(calculator_tool, temp_cache_dir):
     """Test that generated code accepts context parameter with correct default."""
-    runtime = Runtime()
+    runtime = Runtime(cache_dir=temp_cache_dir)
     runtime.verify = [IsLoop()]
     set_runtime(runtime)
     llm_tool = LLM("groq:openai/gpt-oss-20b")
@@ -356,7 +357,7 @@ async def test_context_parameter_in_generated_code(calculator_tool, temp_cache_d
 async def test_agent_aot_and_jit_convenience_methods(calculator_tool, temp_cache_dir):
     """Test Agent.aot() and Agent.jit() convenience methods."""
     # Set global runtime
-    runtime = Runtime()
+    runtime = Runtime(cache_dir=temp_cache_dir)
     runtime.verify = [IsLoop()]
     set_runtime(runtime)
     

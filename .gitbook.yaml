@@ -1,0 +1,17 @@
+# GitBook Configuration
+root: ./docs
+
+# Ignore files
+ignore:
+  - README.md
+  - CONTRIBUTING.md
+  - ARCHITECTURE.md
+  - QUICKREF.md
+  - CHANGELOG.md
+  - node_modules/
+  - .git/
+  - .venv/
+  - __pycache__/
+  - "*.pyc"
+  - dist/
+  - build/

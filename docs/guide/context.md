@@ -1,0 +1,423 @@
+# Context & History
+
+Context tracks conversation history for agents, including user messages, assistant responses, and tool calls.
+
+## Overview
+
+A **Context** is a list of messages that preserves the conversation state across agent interactions. Contexts are:
+
+- **Named**: Multiple independent contexts can exist (`main`, `analysis`, etc.)
+- **Persistent**: Can be saved to disk and restored
+- **Typed**: Messages follow the OpenAI format with roles and content
+
+## Basic Usage
+
+```python
+from a1 import get_context
+
+# Get or create a context
+ctx = get_context("main")  # Default context name
+
+# Add messages
+ctx.user("What is 2+2?")
+ctx.assistant("4")
+
+# Access messages
+print(f"Total messages: {len(ctx)}")
+for msg in ctx:
+    print(f"{msg.role}: {msg.content}")
+```
+
+## Message Types
+
+Context supports four message roles:
+
+```python
+# User messages
+ctx.user("Hello, world!")
+
+# Assistant (LLM) messages
+ctx.assistant("Hi there!")
+
+# Assistant with tool calls
+ctx.assistant("Let me search for that", tool_calls=[...])
+
+# Tool result messages  
+ctx.tool(
+    content='{"result": 42}',
+    name="calculator",
+    tool_call_id="call_123"
+)
+
+# System messages (rare)
+ctx.system("You are a helpful assistant")
+```
+
+## When Context is Appended
+
+### JIT (Just-in-Time) Mode
+
+**Before code generation:**
+```python
+# Runtime.jit() appends user message with input
+runtime.jit(agent, problem="What is 2+2?")
+# → ctx.user('{"problem": "What is 2+2?"}')
+```
+
+**After code execution:**
+```python
+# Runtime adds assistant message with output
+# → ctx.assistant('{"result": "4"}')
+```
+
+**Within generated code:**
+Generated code can call LLM tools, which append to context:
+```python
+# Generated code calls LLM
+result = await llm_a("Solve this problem", output_schema=Answer)
+
+# This appends:
+# → ctx.user("Solve this problem")  
+# → ctx.assistant('{"answer": 4, "explanation": "2+2=4"}')
+```
+
+**Generated code calling other tools:**
+```python
+# Generated code calls calculator
+calc_result = await calculator(a=2, b=2, operation="add")
+
+# This appends:
+# → ctx.assistant("", tool_calls=[{"function": {"name": "calculator", "arguments": ...}}])
+# → ctx.tool('{"result": 4}', name="calculator", tool_call_id="...")
+```
+
+### AOT (Ahead-of-Time) Mode
+
+**During compilation:**
+- Code generation LLM calls append to a **temporary context** (not main)
+- Multiple candidates may generate in parallel
+- **Main context is NOT polluted with generation attempts**
+
+**After compilation:**
+```python
+compiled = await runtime.aot(agent)
+# No context appended during compilation
+```
+
+**During execution of compiled tool:**
+```python
+result = await compiled.execute(problem="What is 2+2?")
+
+# Appends to main context:
+# → ctx.user('{"problem": "What is 2+2?"}')
+# → ctx.assistant('{"result": "4"}')
+```
+
+**Within compiled code:**
+Same as JIT - LLM and tool calls within the compiled code append to main context.
+
+### Summary: What Goes into Main Context
+
+| Operation | Main Context? | What Gets Appended | On Failure |
+|-----------|--------------|-------------------|------------|
+| `runtime.jit(agent, ...)` **start** | ✅ Yes | User input: `{"field": "value"}` | Nothing |
+| `runtime.jit(agent, ...)` **end** | ✅ Yes | Assistant output: `{"result": ...}` | Nothing (raises exception) |
+| `runtime.aot(agent)` | ❌ No | Nothing (uses temp context) | Nothing |
+| `compiled_tool(**input)` via `Tool.__call__` | ❌ No | Nothing (it's a regular tool call) | Nothing |
+| `runtime.execute(tool, **input)` | ✅ Yes (non-LLM only) | Assistant tool_call + tool result | Error in tool message |
+| **LLM call in generated code** | ✅ Yes | User prompt + assistant response | Nothing (raises exception) |
+| **Non-LLM tool in generated code** | ✅ Yes | Assistant tool_call + tool result | Error in tool message |
+| **LLM tool via runtime.execute()** | ❌ No | Nothing (LLM tools skip context) | Nothing |
+| Code generation retries | ❌ No | Nothing (internal context) | N/A |
+| Multiple candidates (AOT/JIT) | ❌ No | Nothing (only winner matters) | N/A |
+
+**Key Insights:**
+
+1. **JIT appends to main context** - Both input (at start) and output (at end)
+2. **AOT compilation uses temp context** - Main context stays clean during generation
+3. **AOT execution (compiled tool) doesn't append** - It's just a regular tool
+4. **Generated code's LLM/tool calls DO append** - They use the main context
+5. **On failure, nothing is appended** - Failed operations raise exceptions without polluting context
+6. **LLM tools are special** - When called via `runtime.execute()`, they don't append (to avoid double-tracking)
+
+
+
+## Persistence
+
+Contexts can be saved and loaded with automatic sync:
+
+```python
+from a1 import Context
+
+# Create persistent context with auto-save
+ctx = Context.from_file("conversation.json", keep_updated=True)
+
+# Any changes auto-save to disk
+ctx.user("Hello")  # Automatically written to conversation.json
+ctx.assistant("Hi there")  # Auto-saved
+
+# Later session - restore from disk
+ctx = Context.from_file("conversation.json")
+print(f"Restored {len(ctx)} messages")
+```
+
+The `keep_updated=True` option enables automatic persistence - every message added is immediately saved to disk.
+
+### Manual Serialization
+
+```python
+import json
+
+# Save context
+ctx = get_context("main")
+with open("context.json", "w") as f:
+    json.dump([msg.model_dump() for msg in ctx.messages], f)
+
+# Load context
+from a1 import Context, Message
+
+with open("context.json") as f:
+    messages = [Message(**msg) for msg in json.load(f)]
+    ctx = Context(messages=messages)
+```
+
+## Context Management
+
+### Multiple Contexts
+
+Use named contexts for different conversations:
+
+```python
+# Separate contexts for different tasks
+main_ctx = get_context("main")
+analysis_ctx = get_context("analysis")
+debug_ctx = get_context("debug")
+
+# Each maintains independent history
+main_ctx.user("Solve problem A")
+analysis_ctx.user("Analyze data B")
+```
+
+### Clearing Context
+
+```python
+ctx = get_context("main")
+ctx.clear()  # Remove all messages
+```
+
+### Context Isolation
+
+```python
+from a1 import Runtime
+
+# Each runtime has independent contexts
+runtime1 = Runtime()
+runtime2 = Runtime()
+
+with runtime1:
+    ctx = get_context("main")  # runtime1's main context
+    
+with runtime2:
+    ctx = get_context("main")  # runtime2's main context (different!)
+```
+
+## Compaction
+
+For long conversations, use compaction strategies to reduce token usage:
+
+```python
+from a1 import Runtime
+from a1.context import TruncateOldest
+
+# Compact context by removing old messages
+runtime = Runtime(
+    compact=TruncateOldest(max_messages=100)
+)
+
+# Or implement custom strategy
+from a1.context import Compact
+
+class SummarizeOldest(Compact):
+    def compact(self, contexts):
+        for name, ctx in contexts.items():
+            if len(ctx) > 50:
+                # Summarize and keep recent messages
+                ...
+        return contexts
+
+runtime = Runtime(compact=SummarizeOldest())
+```
+
+See [Strategies](../advanced/strategies.md) for compaction strategies.
+
+## Runtime Persistence
+
+You can persist the entire Runtime state including all contexts:
+
+```python
+from a1 import Runtime
+
+# Create persistent runtime
+runtime = Runtime.from_file("runtime.json", keep_updated=True)
+
+# All context changes auto-save
+with runtime:
+    ctx = get_context("main")
+    ctx.user("Hello")  # Triggers save to runtime.json
+
+# Later - restore runtime with all contexts
+runtime = Runtime.from_file("runtime.json")
+ctx = get_context("main")  # Restored with all messages
+```
+
+## Context Labels
+
+A1 uses labeled contexts to organize different types of messages:
+
+- **`main`**: Clean successful execution history (user inputs + successful outputs)
+- **`attempt_*`**: Code generation/execution attempts (e.g., `attempt_a`, `attempt_b`)
+- **`intermediate_*`**: LLM tool calls from within generated code
+
+```python
+from a1 import get_runtime, new_context
+
+runtime = get_runtime()
+
+# Create auto-named contexts
+attempt_ctx = new_context("attempt")  # Creates "attempt_a"
+attempt_ctx2 = new_context("attempt")  # Creates "attempt_b"
+intermediate = new_context("intermediate")  # Creates "intermediate_a"
+
+# Get full context history across all labels
+all_messages = runtime.get_full_context()  # All contexts, sorted by timestamp
+
+# Get specific labels
+main_only = runtime.get_full_context("main")  # Just main context
+attempts = runtime.get_full_context("attempt")  # All attempt_* contexts
+combined = runtime.get_full_context(["main", "intermediate"])  # Multiple labels
+```
+
+### Message Metadata
+
+Every message has timestamp and unique ID:
+
+```python
+ctx = get_context("main")
+ctx.user("Hello")
+
+msg = ctx.messages[-1]
+print(msg.timestamp)  # datetime object
+print(msg.message_id)  # Unique UUID
+print(msg.role)  # "user"
+print(msg.content)  # "Hello"
+```
+
+### Full Context Retrieval
+
+Get chronologically ordered messages from all contexts:
+
+```python
+runtime = get_runtime()
+
+# Get all messages from all contexts, deduplicated and sorted
+all_msgs = runtime.get_full_context()
+
+# Filter by time
+recent = [m for m in all_msgs if m.timestamp > some_time]
+
+# Group by role
+by_role = {}
+for msg in all_msgs:
+    by_role.setdefault(msg.role, []).append(msg)
+```
+
+## Observability
+
+For debugging and monitoring, you can access the full context history:
+
+```python
+from a1 import get_runtime
+
+runtime = get_runtime()
+
+# Access all contexts
+for name, ctx in runtime.CTX.items():
+    print(f"Context '{name}': {len(ctx)} messages")
+    
+    # Filter by role
+    user_msgs = [m for m in ctx if m.role == "user"]
+    assistant_msgs = [m for m in ctx if m.role == "assistant"]
+    tool_msgs = [m for m in ctx if m.role == "tool"]
+    
+    print(f"  User: {len(user_msgs)}")
+    print(f"  Assistant: {len(assistant_msgs)}")
+    print(f"  Tool: {len(tool_msgs)}")
+
+# Get full chronological history
+all_messages = runtime.get_full_context()
+print(f"Total messages across all contexts: {len(all_messages)}")
+
+# Inspect specific context types
+main_messages = runtime.get_full_context("main")
+attempt_messages = runtime.get_full_context("attempt")
+print(f"Main: {len(main_messages)}, Attempts: {len(attempt_messages)}")
+```
+
+### Generated Code in Context
+
+**Question: Does context include generated code?**
+
+**Answer: No.** The generated code itself is NOT appended to context. Only the **runtime behavior** (LLM calls, tool calls) is tracked.
+
+**Question: What about retry attempts?**
+
+**Answer: No.** Internal retry attempts for validation are NOT appended to main context. Only the **final successful result** appears.
+
+## Best Practices
+
+### 1. Use Named Contexts for Separation
+```python
+# ❌ Everything in one context
+ctx = get_context("main")
+ctx.user("Analyze data")
+ctx.user("Debug error")  # Mixed concerns
+
+# ✅ Separate contexts
+get_context("analysis").user("Analyze data")
+get_context("debug").user("Debug error")
+```
+
+### 2. Persist Important Conversations
+```python
+# For critical sessions
+ctx = Context.from_file("important.json", keep_updated=True)
+
+# For throwaway sessions
+from a1.llm import no_context
+ctx = no_context()  # Won't be saved
+```
+
+### 3. Monitor Context Growth
+```python
+ctx = get_context("main")
+if len(ctx) > 100:
+    # Consider compaction or summarization
+    runtime.compact.compact({"main": ctx})
+```
+
+### 4. Don't Mix Compilation and Execution Context
+```python
+# ✅ Good: AOT uses temp context, execution uses main
+compiled = await runtime.aot(agent)  # Temp context
+result = await compiled.execute(...)  # Main context
+
+# ❌ Bad: Don't manually manipulate during compilation
+# (Runtime handles this automatically)
+```
+
+## See Also
+
+- [Agents](agents.md) - Using context in agents
+- [LLM Integration](llm.md) - LLM context behavior
+- [Strategies](../advanced/strategies.md) - Compaction strategies
+- [Observability](../advanced/observability.md) - Debugging with context

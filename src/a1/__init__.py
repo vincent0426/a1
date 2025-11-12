@@ -33,10 +33,10 @@ Quick Start:
     result = await runtime.jit(agent, "What is 2 + 2?")
 """
 
-from .models import Agent, Tool, ToolSet, Skill, SkillSet, tool, Message, Strategy
+from .models import Agent, Tool, ToolSet, Skill, SkillSet, tool, Message, Strategy, RetryStrategy
 from .builtin_tools import LLM, Done
 from .llm import LLMInput, LLMOutput, no_context
-from .runtime import Runtime, get_runtime, set_runtime, get_context
+from .runtime import Runtime, get_runtime, set_runtime, set_strategy, get_context
 from .context import Context, no_history, Compact, BaseCompact
 from .executor import Executor, BaseExecutor, CodeOutput
 from .strategies import (
@@ -44,8 +44,7 @@ from .strategies import (
     Verify, BaseVerify, QualitativeCriteria, IsLoop,
     Cost, BaseCost, QuantitativeCriteria
 )
-from .rag import FileSystemRAG, SQLRAG
-from .rag_router import RAG
+from .rag import FileSystem, Database, RAG
 from .serialization import (
     serialize_agent, deserialize_agent,
     serialize_tool, deserialize_tool,
@@ -66,6 +65,7 @@ __all__ = [
     "tool",
     "Message",
     "Strategy",
+    "RetryStrategy",
     
     # Built-in tools
     "LLM",
@@ -78,6 +78,7 @@ __all__ = [
     "Runtime",
     "get_runtime",
     "set_runtime",
+    "set_strategy",
     "get_context",
     
     # Context management
@@ -103,8 +104,8 @@ __all__ = [
     "QuantitativeCriteria",
     
     # RAG
-    "FileSystemRAG",
-    "SQLRAG",
+    "FileSystem",
+    "Database",
     "RAG",
     
     # Version

@@ -11,13 +11,13 @@ import logging
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
 from contextvars import ContextVar
 
 from .context import Context, BaseCompact
 from .executor import BaseExecutor
 from .strategies import BaseGenerate, BaseVerify, BaseCost
-from .models import Agent, Tool, Strategy
+from .models import Agent, Tool, Strategy, Message
 
 if TYPE_CHECKING:
     from .strategies import Generate, Verify, Cost, Compact
@@ -58,15 +58,37 @@ class Runtime:
         cost: Optional['Cost'] = None,
         compact: Optional['Compact'] = None,
         executor: Optional['Executor'] = None,
-        cache_dir: str = ".a1"
+        cache_dir: str = ".a1",
+        strategy: Optional['Strategy'] = None,
+        file_path: Optional[Path] = None,
+        keep_updated: bool = False
     ):
         from .builtin_tools import LLM
         from .llm import no_context
         from pydantic import BaseModel, Field
         from typing import Optional, List, Dict, Any, Union
+        from .models import Strategy
+        
+        # Persistence settings
+        self.file_path = Path(file_path) if file_path else None
+        self.keep_updated = keep_updated
+        
+        # If strategy is provided, use its fields (they override individual params)
+        if strategy is not None:
+            generate = strategy.generate if strategy.generate is not None else generate
+            verify = strategy.verify if strategy.verify is not None else verify
+            cost = strategy.cost if strategy.cost is not None else cost
+            compact = strategy.compact if strategy.compact is not None else compact
+            # Store the strategy for later use
+            self.strategy = strategy
+        else:
+            self.strategy = Strategy()  # Default strategy
         
         self.generate = generate or BaseGenerate(llm_tool=LLM("groq:openai/gpt-oss-20b"))
-        self.verify = verify or [BaseVerify()]
+        self.verify = verify if verify is not None else [BaseVerify()]
+        # Handle verify as single item or list
+        if not isinstance(self.verify, list):
+            self.verify = [self.verify]
         self.cost = cost or BaseCost()
         self.compact = compact or BaseCompact()
         
@@ -95,6 +117,81 @@ class Runtime:
         
         # Current agent being executed (for tool calling)
         self.current_agent: Optional[Agent] = None
+        
+        # Save initial state if persistence enabled
+        if self.keep_updated and self.file_path:
+            self._save()
+    
+    def _save(self):
+        """Save runtime state to file if persistence is enabled."""
+        if self.file_path:
+            import json
+            from .models import Message
+            
+            data = {
+                "cache_dir": str(self.cache_dir),
+                "contexts": {
+                    # Use mode='json' to properly serialize datetime objects
+                    name: [msg.model_dump(exclude_none=True, mode='json') for msg in ctx.messages]
+                    for name, ctx in self.CTX.items()
+                }
+            }
+            
+            self.file_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.file_path, "w") as f:
+                json.dump(data, f, indent=2)
+    
+    @classmethod
+    def from_file(cls, path: str, keep_updated: bool = False, **kwargs) -> "Runtime":
+        """
+        Load runtime state from a file, optionally enabling auto-save on changes.
+        
+        Args:
+            path: Path to JSON file containing runtime state
+            keep_updated: If True, auto-save runtime state on context changes
+            **kwargs: Additional Runtime constructor arguments
+        
+        Returns:
+            Runtime instance with loaded state
+        
+        Example:
+            >>> runtime = Runtime.from_file("session.json", keep_updated=True)
+            >>> ctx = get_context("main")  # Restored from file
+            >>> ctx.user("Hello")  # Automatically saved
+        """
+        import json
+        from .models import Message
+        
+        file_path = Path(path)
+        
+        if file_path.exists():
+            with open(file_path) as f:
+                data = json.load(f)
+            
+            # Extract cache_dir from saved state if not provided
+            if "cache_dir" not in kwargs:
+                kwargs["cache_dir"] = data.get("cache_dir", ".a1")
+        else:
+            data = {"contexts": {}}
+        
+        # Create runtime with persistence settings
+        runtime = cls(
+            file_path=file_path,
+            keep_updated=keep_updated,
+            **kwargs
+        )
+        
+        # Restore contexts
+        for name, messages_data in data.get("contexts", {}).items():
+            messages = [Message(**msg) for msg in messages_data]
+            ctx = Context(messages=messages)
+            # Link context to runtime for auto-save
+            if runtime.keep_updated:
+                ctx._runtime_save = runtime._save
+                ctx.keep_updated = True
+            runtime.CTX[name] = ctx
+        
+        return runtime
     
     def __enter__(self):
         """Enter context manager - set as global runtime."""
@@ -122,7 +219,7 @@ class Runtime:
         Args:
             agent: Agent to compile
             cache: Whether to use cached compilation (default: True)
-            strategy: Optional Strategy for generation config (default: Strategy())
+            strategy: Optional Strategy for generation config (overrides runtime strategy)
         
         Returns:
             Tool that executes the compiled agent
@@ -132,9 +229,30 @@ class Runtime:
         from opentelemetry import trace
         import asyncio
         
-        # Use default strategy if not provided
+        # Merge strategies: call strategy > runtime strategy > defaults
         if strategy is None:
-            strategy = Strategy()
+            strategy = self.strategy
+        else:
+            # Merge with runtime strategy (call strategy takes precedence)
+            merged = Strategy(
+                max_iterations=strategy.max_iterations,
+                num_candidates=strategy.num_candidates,
+                min_candidates_for_comparison=strategy.min_candidates_for_comparison,
+                accept_cost_threshold=strategy.accept_cost_threshold,
+                compare_cost_threshold=strategy.compare_cost_threshold,
+                generate=strategy.generate if strategy.generate is not None else self.strategy.generate,
+                verify=strategy.verify if strategy.verify is not None else self.strategy.verify,
+                cost=strategy.cost if strategy.cost is not None else self.strategy.cost,
+                compact=strategy.compact if strategy.compact is not None else self.strategy.compact,
+            )
+            strategy = merged
+        
+        # Use strategy fields if provided, otherwise use runtime's
+        generate = strategy.generate if strategy.generate is not None else self.generate
+        verify = strategy.verify if strategy.verify is not None else self.verify
+        if not isinstance(verify, list):
+            verify = [verify]
+        cost = strategy.cost if strategy.cost is not None else self.cost
         
         num_candidates = strategy.num_candidates
         max_retries = strategy.max_iterations
@@ -160,7 +278,7 @@ class Runtime:
                 span.set_attribute("cache.hit", False)
             
             # Check if we should use templated loop
-            is_loop_verifiers = [v for v in self.verify if isinstance(v, IsLoop)]
+            is_loop_verifiers = [v for v in verify if isinstance(v, IsLoop)]
             if is_loop_verifiers:
                 # Use templated loop instead of generation
                 logger.info(f"Using templated loop for {agent.name}")
@@ -170,7 +288,7 @@ class Runtime:
                 
                 # For template verification, we just verify the generated code itself
                 # (no separate definition_code needed for template)
-                for verifier in self.verify:
+                for verifier in verify:
                     is_valid, error = verifier.verify(generated_code, agent=agent)
                     if not is_valid:
                         raise RuntimeError(f"Template verification failed: {error}")
@@ -183,7 +301,7 @@ class Runtime:
                 async def generate_with_retries():
                     past_attempts = []
                     for attempt in range(max_retries):
-                        result = await self.generate.generate(
+                        result = await generate.generate(
                             agent=agent,
                             task=agent.description,
                             return_function=True,  # AOT generates functions
@@ -215,7 +333,7 @@ class Runtime:
                             validation_error = f"IsFunction failed: {error}"
                         else:
                             # Then check other verifiers with tuple of (definition_code, fixed_code)
-                            for verifier in self.verify:
+                            for verifier in verify:
                                 is_valid, error = verifier.verify((definition_code, fixed_code), agent=agent)
                                 if not is_valid:
                                     all_valid = False
@@ -224,8 +342,8 @@ class Runtime:
                         
                         if all_valid:
                             # Compute cost using the strategy's cost estimator
-                            cost = self.cost.compute_cost((definition_code, fixed_code), agent=agent)
-                            return (fixed_code, cost, None)
+                            code_cost = cost.compute_cost((definition_code, fixed_code), agent=agent)
+                            return (fixed_code, code_cost, None)
                         else:
                             # Track attempt for retry
                             past_attempts.append((generated_code, validation_error))
@@ -287,35 +405,62 @@ class Runtime:
         import asyncio
         
         # Handle auto-conversion of string input
-        # If kwargs contains a single string value and the agent's input schema
-        # has exactly one string field, this is likely the intended input
+        # If kwargs contains a single value and the agent's input schema
+        # has exactly one field, try to auto-map intelligently
         if not kwargs:
             # No kwargs provided - this is okay, will fail validation if required
             validated_input = agent.input_schema()
         elif len(kwargs) == 1 and len(agent.input_schema.model_fields) == 1:
-            # Single kwarg and single input field - auto-map even without name match
+            # Single kwarg and single input field
             field_name = list(agent.input_schema.model_fields.keys())[0]
             kwarg_key = list(kwargs.keys())[0]
             kwarg_value = kwargs[kwarg_key]
             
             # Auto-convert by field name match or type compatibility
             if kwarg_key == field_name:
-                # Exact field name match
+                # Exact field name match - use directly
                 validated_input = agent.input_schema(**kwargs)
-            elif isinstance(kwarg_value, str):
-                # String value and single string field - auto-map
-                validated_input = agent.input_schema(**{field_name: kwarg_value})
             else:
-                # Type mismatch - try normal validation
-                validated_input = agent.input_schema(**kwargs)
+                # Different field name - try to auto-map, but validate type first
+                try:
+                    # Try mapping the value to the target field
+                    # This will validate type compatibility via Pydantic
+                    validated_input = agent.input_schema(**{field_name: kwarg_value})
+                except Exception as e:
+                    # If validation fails, raise with helpful error
+                    raise ValueError(
+                        f"Cannot auto-map {kwarg_key}={repr(kwarg_value)} to field '{field_name}': {e}"
+                    )
         else:
             # Multiple kwargs or multiple fields - use normal validation
             validated_input = agent.input_schema(**kwargs)
         input_dict = validated_input.model_dump()
         
-        # Use default strategy if not provided
+        # Merge strategies: call strategy > runtime strategy > defaults
+        from .models import Strategy
         if strategy is None:
-            strategy = Strategy()
+            strategy = self.strategy
+        else:
+            # Merge with runtime strategy (call strategy takes precedence)
+            merged = Strategy(
+                max_iterations=strategy.max_iterations,
+                num_candidates=strategy.num_candidates,
+                min_candidates_for_comparison=strategy.min_candidates_for_comparison,
+                accept_cost_threshold=strategy.accept_cost_threshold,
+                compare_cost_threshold=strategy.compare_cost_threshold,
+                generate=strategy.generate if strategy.generate is not None else self.strategy.generate,
+                verify=strategy.verify if strategy.verify is not None else self.strategy.verify,
+                cost=strategy.cost if strategy.cost is not None else self.strategy.cost,
+                compact=strategy.compact if strategy.compact is not None else self.strategy.compact,
+            )
+            strategy = merged
+        
+        # Use strategy fields if provided, otherwise use runtime's
+        generate = strategy.generate if strategy.generate is not None else self.generate
+        verify = strategy.verify if strategy.verify is not None else self.verify
+        if not isinstance(verify, list):
+            verify = [verify]
+        cost = strategy.cost if strategy.cost is not None else self.cost
         
         num_candidates = strategy.num_candidates
         max_retries = strategy.max_iterations
@@ -332,8 +477,17 @@ class Runtime:
             
             context = self.CTX["main"]
             
-            # Add user message with input
-            context.user(json.dumps(input_dict))
+            # Create attempt context by copying main context
+            # This preserves conversation history while keeping attempts separate
+            # Each code generation attempt gets its own context (attempt_a, attempt_b, etc.)
+            attempt_context = new_context("attempt", source_context=context)
+            
+            # Add user message to both main and attempt contexts
+            # Main gets the clean successful history
+            # Attempt tracks all the generation/execution attempts for this input
+            user_message = json.dumps(input_dict)
+            context.user(user_message)
+            attempt_context.user(user_message)
             
             # Set current agent for tool execution
             self.current_agent = agent
@@ -346,7 +500,7 @@ class Runtime:
                 async def generate_with_retries():
                     past_attempts = []
                     for attempt in range(max_retries):
-                        result = await self.generate.generate(
+                        result = await generate.generate(
                             agent=agent,
                             task=json.dumps(input_dict),
                             return_function=False,  # JIT generates code blocks
@@ -369,7 +523,7 @@ class Runtime:
                         # Validate with verifiers (skip IsLoop which is only for AOT)
                         all_valid = True
                         validation_error = None
-                        for verifier in self.verify:
+                        for verifier in verify:
                             # Skip IsLoop verifier for JIT - it only applies to AOT
                             if isinstance(verifier, IsLoop):
                                 continue
@@ -382,8 +536,8 @@ class Runtime:
                         
                         if all_valid:
                             # Compute cost using the strategy's cost estimator
-                            cost = self.cost.compute_cost((definition_code, fixed_code), agent=agent)
-                            return (fixed_code, definition_code, cost, None)
+                            code_cost = cost.compute_cost((definition_code, fixed_code), agent=agent)
+                            return (fixed_code, definition_code, code_cost, None)
                         else:
                             # Track attempt for retry
                             past_attempts.append((generated_code, validation_error))
@@ -405,54 +559,86 @@ class Runtime:
                     errors = [error for _, _, _, error in results if error]
                     raise RuntimeError(f"All candidates failed validation: {errors}")
                 
-                # Select best candidate by cost
-                code, definition_code, best_cost = min(valid_candidates, key=lambda x: x[2])
-                logger.info(f"Selected best candidate with cost {best_cost} from {len(valid_candidates)} valid")
-                span.set_attribute("generation.best_cost", best_cost)
-                span.set_attribute("generation.num_valid", len(valid_candidates))
+                # Try candidates in order of cost until one executes successfully
+                # This provides execution-time retry in addition to validation-time retry
+                valid_candidates.sort(key=lambda x: x[2])  # Sort by cost
                 
-                # Use code_utils for schema injection
-                from .code_utils import (
-                    inject_schemas_to_executor_state,
-                    clean_schemas_from_executor_state,
-                    populate_definitions_to_executor_state,
-                    validate_code_output,
-                )
+                execution_errors = []
+                for candidate_idx, (code, definition_code, candidate_cost) in enumerate(valid_candidates):
+                    logger.info(f"Trying candidate {candidate_idx + 1}/{len(valid_candidates)} with cost {candidate_cost}")
+                    
+                    try:
+                        # Use code_utils for schema injection
+                        from .code_utils import (
+                            inject_schemas_to_executor_state,
+                            clean_schemas_from_executor_state,
+                            populate_definitions_to_executor_state,
+                            validate_code_output,
+                        )
+                        
+                        # Add agent's input/output schemas to executor state
+                        inject_schemas_to_executor_state(self.executor, agent)
+                        
+                        # Populate executor.state with names from definition_code (imports and schemas)
+                        if definition_code:
+                            populate_definitions_to_executor_state(self.executor, definition_code)
+                        
+                        # Add input variables to executor state so generated code can access them
+                        self.executor.state.update(input_dict)
+                        
+                        # Execute just the generated code (not definition code - that's only for LLM)
+                        exec_result = await self.executor.execute(code, tools=agent.get_all_tools())
+                        
+                        # Clean up schemas from state
+                        clean_schemas_from_executor_state(self.executor, agent)
+                        
+                        if exec_result.error:
+                            error_msg = f"Candidate {candidate_idx + 1}: {exec_result.error}"
+                            execution_errors.append(error_msg)
+                            logger.warning(f"Candidate {candidate_idx + 1} execution failed: {exec_result.error}")
+                            
+                            # Track failure in attempt context
+                            # Add assistant message with the failed code
+                            attempt_context.assistant(f"```python\n{code}\n```")
+                            # Add error as user message (as if user reported the error)
+                            attempt_context.user(f"Execution error: {exec_result.error}")
+                            
+                            continue  # Try next candidate
+                        
+                        # Validate output against agent's output schema
+                        raw_output = exec_result.output
+                        validated_output = validate_code_output(raw_output, agent.output_schema)
+                        
+                        # Success! Log and break
+                        logger.info(f"Candidate {candidate_idx + 1} executed successfully")
+                        span.set_attribute("generation.best_cost", candidate_cost)
+                        span.set_attribute("generation.num_valid", len(valid_candidates))
+                        span.set_attribute("generation.execution_attempts", candidate_idx + 1)
+                        
+                        # Add assistant message
+                        if hasattr(validated_output, 'model_dump'):
+                            output_str = str(validated_output.model_dump())
+                        else:
+                            output_str = str(validated_output)
+                        context.assistant(output_str)
+                        
+                        # Compact contexts if needed
+                        self.CTX = self.compact.compact(self.CTX)
+                        
+                        return validated_output
+                        
+                    except Exception as e:
+                        execution_errors.append(f"Candidate {candidate_idx + 1}: {str(e)}")
+                        logger.warning(f"Candidate {candidate_idx + 1} failed with exception: {e}")
+                        # Clean up on exception
+                        try:
+                            clean_schemas_from_executor_state(self.executor, agent)
+                        except:
+                            pass
+                        continue  # Try next candidate
                 
-                # Add agent's input/output schemas to executor state
-                inject_schemas_to_executor_state(self.executor, agent)
-                
-                # Populate executor.state with names from definition_code (imports and schemas)
-                if definition_code:
-                    populate_definitions_to_executor_state(self.executor, definition_code)
-                
-                # Add input variables to executor state so generated code can access them
-                self.executor.state.update(input_dict)
-                
-                # Execute just the generated code (not definition code - that's only for LLM)
-                exec_result = await self.executor.execute(code, tools=agent.get_all_tools())
-                
-                # Clean up schemas from state
-                clean_schemas_from_executor_state(self.executor, agent)
-                
-                if exec_result.error:
-                    raise RuntimeError(f"Execution error: {exec_result.error}")
-                
-                # Validate output against agent's output schema
-                raw_output = exec_result.output
-                validated_output = validate_code_output(raw_output, agent.output_schema)
-                
-                # Add assistant message
-                if hasattr(validated_output, 'model_dump'):
-                    output_str = str(validated_output.model_dump())
-                else:
-                    output_str = str(validated_output)
-                context.assistant(output_str)
-                
-                # Compact contexts if needed
-                self.CTX = self.compact.compact(self.CTX)
-                
-                return validated_output
+                # All candidates failed execution
+                raise RuntimeError(f"All {len(valid_candidates)} candidates failed execution: {execution_errors}")
             
             finally:
                 self.current_agent = None
@@ -654,9 +840,13 @@ class Runtime:
         """
         Generate templated agentic loop code.
         
-        The LLM tool handles function calling and auto-adds a Done terminal tool if needed.
-        When output_schema is set, LLM returns a properly typed instance.
-        The template just calls LLM with the agent's output schema as the output_schema.
+        The LLM tool now handles the agentic loop internally:
+        - It loops until a terminal tool (Done) is called
+        - When output_schema is provided, the terminal tool result is validated against it
+        - Returns the terminal tool result (matching output_schema) or response_content (string)
+        
+        This template just provides context setup and calls the LLM once.
+        The LLM handles all looping and tool calling internally.
         """
         # Find LLM tool
         llm_tool = None
@@ -671,7 +861,11 @@ class Runtime:
         # Get the output schema class name (e.g., "AgentOutput")
         output_schema_name = agent.output_schema.__name__ if hasattr(agent.output_schema, '__name__') else 'Output'
         
-        # Simple template: call LLM in a loop with agent's output schema as output_schema
+        # Build list of non-LLM tool names for the generated code
+        tool_names = ", ".join(t.name for t in agent.get_all_tools() if "llm" not in t.name.lower())
+        available_tools_line = f"[{tool_names}]" if tool_names else "[]"
+        
+        # Template: call LLM with output_schema (LLM handles loop internally)
         code = f"""# Agentic loop for {agent.name}
 # Get context - use provided context parameter or default to "main"
 try:
@@ -686,29 +880,76 @@ except NameError:
 input_str = str(validated.model_dump() if hasattr(validated, 'model_dump') else validated)
 instruction = f"Complete this task: {{input_str}}. When done, call the 'done' tool with the final result."
 
-# Call LLM with all non-LLM tools until we get an output
-max_iterations = 20
-available_tools = [{", ".join(f"{t.name}" for t in agent.get_all_tools() if "llm" not in t.name.lower())}]
+# Call LLM with output_schema
+# The LLM tool loops internally until a terminal tool is called
+available_tools = {available_tools_line}
+output = await {llm_tool.name}(
+    content=instruction,
+    tools=available_tools,
+    context=context,
+    output_schema={output_schema_name}
+)
 
-iteration = 0
-while iteration < max_iterations:
-    output = await {llm_tool.name}(
-        content=instruction if iteration == 0 else "Continue with the task.",
-        tools=available_tools,
-        context=context,
-        output_schema={output_schema_name}
-    )
-    
-    # If we got an output instance, we're done
-    if isinstance(output, {output_schema_name}):
-        break
-    
-    iteration += 1
-else:
-    # Max iterations reached - shouldn't happen with output_schema set
-    raise RuntimeError("Failed to complete task in {{max_iterations}} iterations")
+# output is now either:
+# - An instance of {output_schema_name} (if terminal tool was called and result matched schema)
+# - A string (response_content if no terminal tool or couldn't parse)
+# Validate it's the right type
+if not isinstance(output, {output_schema_name}):
+    raise RuntimeError(f"LLM did not return {output_schema_name} instance, got {{type(output).__name__}}")
 """
         return code.strip()
+    
+    def get_full_context(self, labels: Optional[Union[str, List[str]]] = None) -> List[Message]:
+        """
+        Get all messages from specified contexts, sorted by timestamp with deduplication.
+        
+        Args:
+            labels: Context label(s) to include. Can be:
+                    - None: Include all contexts
+                    - str: Single label (e.g., "main", "attempt", "intermediate")
+                    - List[str]: Multiple labels (e.g., ["main", "intermediate"])
+        
+        Returns:
+            List of messages sorted by timestamp, deduplicated by message_id
+        
+        Examples:
+            >>> runtime.get_full_context()  # All messages from all contexts
+            >>> runtime.get_full_context("main")  # Only main context
+            >>> runtime.get_full_context(["main", "intermediate"])  # Main + intermediate
+        """
+        from .models import Message
+        
+        # Normalize labels to a set
+        if labels is None:
+            # Include all contexts
+            context_keys = list(self.CTX.keys())
+        elif isinstance(labels, str):
+            # Single label - find all contexts starting with this label
+            context_keys = [k for k in self.CTX.keys() if k == labels or k.startswith(f"{labels}_")]
+        else:
+            # Multiple labels - find all contexts starting with any of these labels
+            context_keys = []
+            for label in labels:
+                context_keys.extend([k for k in self.CTX.keys() if k == label or k.startswith(f"{label}_")])
+        
+        # Collect all messages
+        all_messages = []
+        for key in context_keys:
+            if key in self.CTX:
+                all_messages.extend(self.CTX[key].messages)
+        
+        # Deduplicate by message_id (keeps first occurrence)
+        seen_ids = set()
+        unique_messages = []
+        for msg in all_messages:
+            if msg.message_id not in seen_ids:
+                seen_ids.add(msg.message_id)
+                unique_messages.append(msg)
+        
+        # Sort by timestamp
+        unique_messages.sort(key=lambda m: m.timestamp)
+        
+        return unique_messages
 
 
 # Global runtime management
@@ -728,6 +969,30 @@ def set_runtime(runtime: Runtime):
     _runtime_var.set(runtime)
 
 
+def set_strategy(strategy: 'Strategy'):
+    """
+    Set the strategy for the current global runtime.
+    
+    Args:
+        strategy: Strategy to apply to the current runtime
+    """
+    runtime = get_runtime()
+    from .models import Strategy
+    
+    # Update runtime's strategy
+    runtime.strategy = strategy
+    
+    # Update runtime's generation/verification/cost if specified in strategy
+    if strategy.generate is not None:
+        runtime.generate = strategy.generate
+    if strategy.verify is not None:
+        runtime.verify = strategy.verify if isinstance(strategy.verify, list) else [strategy.verify]
+    if strategy.cost is not None:
+        runtime.cost = strategy.cost
+    if strategy.compact is not None:
+        runtime.compact = strategy.compact
+
+
 def get_context(key: str = "main"):
     """
     Get or create a context by key.
@@ -741,13 +1006,88 @@ def get_context(key: str = "main"):
     from .context import Context
     runtime = get_runtime()
     if key not in runtime.CTX:
-        runtime.CTX[key] = Context()
+        # Create new context, linking to runtime for auto-save
+        ctx = Context()
+        # Link context to runtime for persistence
+        if runtime.keep_updated and runtime.file_path:
+            ctx._runtime_save = runtime._save
+            ctx.keep_updated = True  # Enable auto-save for this context
+        runtime.CTX[key] = ctx
+        # Trigger initial save if runtime is persistent
+        if runtime.keep_updated and runtime.file_path:
+            runtime._save()
     return runtime.CTX[key]
+
+
+def new_context(label: str = "intermediate", source_context: Optional["Context"] = None):
+    """
+    Create a new context with auto-generated unique name and register it in Runtime.
+    
+    Context names follow pattern: {label}_{suffix} where suffix is a, b, c, ..., z, aa, ab, etc.
+    
+    Args:
+        label: Label prefix for the context (e.g., "attempt", "intermediate", "main")
+        source_context: Optional source context to copy messages from
+    
+    Returns:
+        Newly created Context object registered in Runtime.CTX
+    
+    Examples:
+        >>> ctx1 = new_context("attempt")  # Creates "attempt_a"
+        >>> ctx2 = new_context("attempt")  # Creates "attempt_b"
+        >>> ctx3 = new_context("intermediate")  # Creates "intermediate_a"
+    """
+    from .context import Context
+    runtime = get_runtime()
+    
+    # Generate unique suffix (a, b, c, ..., z, aa, ab, ...)
+    def gen_suffix(n):
+        """Generate suffix: 0->a, 1->b, ..., 25->z, 26->aa, 27->ab, etc."""
+        result = ""
+        while True:
+            result = chr(ord('a') + (n % 26)) + result
+            n //= 26
+            if n == 0:
+                break
+            n -= 1  # Adjust for aa coming after z
+        return result
+    
+    # Find next available suffix for this label
+    existing_keys = [k for k in runtime.CTX.keys() if k.startswith(f"{label}_")]
+    counter = 0
+    while True:
+        suffix = gen_suffix(counter)
+        key = f"{label}_{suffix}"
+        if key not in runtime.CTX:
+            break
+        counter += 1
+    
+    # Create new context
+    ctx = Context()
+    
+    # Copy messages from source if provided
+    if source_context is not None:
+        ctx.messages = source_context.messages.copy()
+    
+    # Link context to runtime for persistence
+    if runtime.keep_updated and runtime.file_path:
+        ctx._runtime_save = runtime._save
+        ctx.keep_updated = True
+    
+    runtime.CTX[key] = ctx
+    
+    # Trigger initial save if runtime is persistent
+    if runtime.keep_updated and runtime.file_path:
+        runtime._save()
+    
+    return ctx
 
 
 __all__ = [
     "Runtime",
     "get_runtime",
     "set_runtime",
+    "set_strategy",
     "get_context",
+    "new_context",
 ]

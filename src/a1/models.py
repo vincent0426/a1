@@ -10,6 +10,8 @@ This module defines the fundamental building blocks:
 from typing import Any, Callable, Dict, List, Optional, Union, get_type_hints
 from enum import Enum
 import inspect
+from datetime import datetime
+from uuid import uuid4
 from pydantic import BaseModel, Field, create_model, ConfigDict
 
 
@@ -20,26 +22,53 @@ class Message(BaseModel):
     name: Optional[str] = Field(None, description="Name of tool or function")
     tool_call_id: Optional[str] = Field(None, description="ID of tool call")
     tool_calls: Optional[List[Dict[str, Any]]] = Field(None, description="Tool calls made")
+    timestamp: datetime = Field(default_factory=datetime.now, description="Message creation timestamp")
+    message_id: str = Field(default_factory=lambda: uuid4().hex, description="Unique message ID for deduplication")
 
 
-class Strategy(BaseModel):
+class RetryStrategy(BaseModel):
+    """
+    Base retry strategy for LLM operations.
+    
+    Controls retry behavior and parallel execution for operations that may need
+    multiple attempts to succeed (e.g., LLM calls with structured output validation).
+    
+    Attributes:
+        max_iterations: Maximum retry attempts per operation (default: 3)
+        num_candidates: Number of parallel attempts to execute (default: 1)
+    """
+    max_iterations: int = Field(default=3, description="Maximum retry attempts per operation")
+    num_candidates: int = Field(default=1, description="Number of parallel attempts to execute")
+
+
+class Strategy(RetryStrategy):
     """
     Configuration strategy for code generation (aot/jit).
     
-    Controls parallel generation, early stopping, and cost-based selection.
+    Extends RetryStrategy with additional parameters for cost-based selection,
+    early stopping, and customizable generation/verification/cost pipelines.
     
     Attributes:
         max_iterations: Maximum refinement iterations per candidate (default: 3)
-        num_candidates: Number of candidates to generate in parallel (default: 1)
+        num_candidates: Number of candidates to generate in parallel (default: 3)
         min_candidates_for_comparison: Minimum valid candidates before early comparison (default: 1)
         accept_cost_threshold: If set, immediately accept candidate below this cost (default: None)
         compare_cost_threshold: If set, compare early when min_candidates below this cost (default: None)
+        generate: Custom code generation strategy (default: None, uses runtime's)
+        verify: Custom verification strategy or list of strategies (default: None, uses runtime's)
+        cost: Custom cost estimation strategy (default: None, uses runtime's)
+        compact: Custom code compaction strategy (default: None, uses runtime's)
     """
-    max_iterations: int = Field(default=3, description="Maximum refinement iterations per candidate")
-    num_candidates: int = Field(default=1, description="Number of candidates to generate in parallel")
+    num_candidates: int = Field(default=3, description="Number of parallel attempts to execute")  # Override default
     min_candidates_for_comparison: int = Field(default=1, description="Minimum candidates before early comparison")
     accept_cost_threshold: Optional[float] = Field(default=None, description="Immediately accept if cost below threshold")
     compare_cost_threshold: Optional[float] = Field(default=None, description="Compare early when min_candidates below threshold")
+    generate: Optional[Any] = Field(default=None, description="Custom code generation strategy")
+    verify: Optional[Any] = Field(default=None, description="Custom verification strategy or list")
+    cost: Optional[Any] = Field(default=None, description="Custom cost estimation strategy")
+    compact: Optional[Any] = Field(default=None, description="Custom code compaction strategy")
+    
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class Tool(BaseModel):
@@ -589,8 +618,7 @@ class Agent(BaseModel):
             description=getattr(langchain_agent, 'description', 'Converted from LangChain'),
             input_schema=create_model("Input", query=(str, ...)),
             output_schema=create_model("Output", response=(str, ...)),
-            tools=tools,
-            terminal_tools=["done"]
+            tools=tools
         )
 
 
@@ -627,6 +655,7 @@ def _json_type_to_python(json_type: str) -> type:
 
 __all__ = [
     "Message",
+    "RetryStrategy",
     "Strategy",
     "Tool",
     "tool",
