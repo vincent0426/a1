@@ -5,9 +5,20 @@
   "logo": "assets/a1_icon.svg",
   "favicon": "assets/a1_icon.svg",
   "colors": {
-    "primary": "#ffe067"
+    "primary": "#ffe067",
+    "light": "#ffe067"
   },
-  "theme": "mint",
+  "theme": "willow",
+  "appearance": {
+    "default": "dark",
+    "strict": true
+  },
+  "background": {
+    "color": {
+      "dark": "#1f1f1f",
+      "light": "#ffffff"
+    }
+  },
   "navigation": {
     "pages": [
       {
