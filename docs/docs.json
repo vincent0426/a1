@@ -5,7 +5,7 @@
   "logo": "assets/a1_icon.svg",
   "favicon": "assets/a1_icon.svg",
   "colors": {
-    "primary": "#FFE067"
+    "primary": "#ffe067"
   },
   "theme": "mint",
   "navigation": {
