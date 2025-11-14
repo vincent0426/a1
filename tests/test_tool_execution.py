@@ -12,6 +12,9 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from pydantic import BaseModel
 
 from a1 import RAG, Database, FileSystem, ToolSet
 
@@ -99,13 +102,6 @@ class TestToolExecution:
     @pytest.mark.asyncio
     async def test_sqlrag_execution(self):
         """Test actually executing SQL tool."""
-        df_data = {
-            "id": [1, 2, 3],
-            "product": ["Widget", "Gadget", "Doohickey"],
-            "price": [9.99, 19.99, 14.99],
-            "in_stock": [True, False, True],
-        }
-
         db = Database("duckdb:///:memory:")
         rag = RAG(database=db)
         rag_toolset = rag.get_toolset()
@@ -284,25 +280,9 @@ class TestOpenAPIToolLoading:
 class TestFastAPIIntegration:
     """Test integration with FastAPI servers."""
 
-    def test_fastapi_imports(self):
-        """Test that FastAPI can be imported."""
-        try:
-            import fastapi
-
-            print("✓ FastAPI is installed")
-        except ImportError:
-            pytest.skip("FastAPI not installed")
-
     @pytest.mark.asyncio
     async def test_fastapi_server_as_tool_source(self):
         """Test using a FastAPI server as a tool source."""
-        try:
-            from fastapi import FastAPI
-            from fastapi.testclient import TestClient
-            from pydantic import BaseModel
-        except ImportError:
-            pytest.skip("FastAPI not installed")
-
         # Create a simple FastAPI app
         app = FastAPI(title="Test API", openapi_url="/openapi.json")
 
@@ -333,13 +313,11 @@ class TestFastAPIIntegration:
         response = client.post("/calculate", json={"operation": "add", "a": 5, "b": 3})
         assert response.status_code == 200
         assert response.json()["result"] == 8
-        print(f"✓ FastAPI endpoint works: 5 + 3 = {response.json()['result']}")
 
         # Test status endpoint
         response = client.get("/status")
         assert response.status_code == 200
         assert response.json()["status"] == "ok"
-        print("✓ FastAPI status endpoint works")
 
         # Test OpenAPI spec
         response = client.get("/openapi.json")
@@ -347,8 +325,3 @@ class TestFastAPIIntegration:
         openapi_spec = response.json()
         assert "paths" in openapi_spec
         assert "/calculate" in openapi_spec["paths"]
-        print(f"✓ FastAPI OpenAPI spec available with {len(openapi_spec['paths'])} paths")
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v", "-s"])
