@@ -10,6 +10,7 @@ This module defines the fundamental building blocks:
 import inspect
 from collections.abc import Callable
 from datetime import datetime
+from types import NoneType
 from typing import Any, Optional, Union, get_type_hints
 from uuid import uuid4
 
@@ -291,7 +292,7 @@ def tool(name: str | None = None, description: str | None = None, is_terminal: b
         InputModel = create_model(f"{func_name}_Input", **input_fields)
 
         # Create output schema from return type
-        if return_type == Any or return_type is None:
+        if return_type in [Any, NoneType]:
             OutputModel = create_model(f"{func_name}_Output", result=(Any, ...))
         elif isinstance(return_type, type) and issubclass(return_type, BaseModel):
             OutputModel = return_type
@@ -428,9 +429,7 @@ class ToolSet(BaseModel):
                 input_schema = _json_schema_to_pydantic(mcp_tool.inputSchema, f"{mcp_tool.name}_Input")
 
                 # MCP tools return CallToolResult
-                output_schema = create_model(
-                    f"{mcp_tool.name}_Output", content=(Any, ...), isError=(bool, False)
-                )
+                output_schema = create_model(f"{mcp_tool.name}_Output", content=(Any, ...), isError=(bool, False))
 
                 # Create execute wrapper that captures the current tool/session
                 def make_execute_wrapper(tool_name: str, sess):
@@ -522,10 +521,7 @@ class ToolSet(BaseModel):
                     continue
 
         if not spec:
-            raise ValueError(
-                f"Could not find OpenAPI spec at {endpoint}. "
-                f"Tried: {', '.join(spec_paths)}"
-            )
+            raise ValueError(f"Could not find OpenAPI spec at {endpoint}. Tried: {', '.join(spec_paths)}")
 
         # Extract API info
         api_title = spec.get("info", {}).get("title", "API")
