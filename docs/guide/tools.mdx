@@ -5,7 +5,7 @@ description: Create tools for agents to take action
 
 ## Python Functions
 
-Create tools from any async function:
+Create tools from any async function using the `@tool` decorator:
 
 ```python
 from a1 import tool
@@ -21,26 +21,47 @@ async def calculate(expression: str) -> float:
     return eval(expression)
 ```
 
+Or pass functions directly to Agent (auto-converted to tools):
+
+```python
+async def divide(a: float, b: float) -> float:
+    """Divide two numbers."""
+    return a / b
+
+agent = Agent(tools=[search, divide])  # Both @tool and raw functions work
+```
+
 Supports primitive and complex return types (Pydantic models, lists, dicts).
 
 ## OpenAPI
 
-Create tools from OpenAPI specifications:
+Create tools from OpenAPI 3.0 specifications:
 
 ```python
-from a1 import openapi
+from a1 import ToolSet
 
-tools = openapi.from_spec("https://api.example.com/openapi.json")
+tools = await ToolSet.from_openapi("https://api.example.com")
 ```
+
+Auto-detects spec at `/openapi.json`, `/openapi.yaml`, `/swagger.json`, or `/swagger.yaml`.
 
 ## Model Context Protocol (MCP)
 
 Create tools from MCP servers:
 
 ```python
-from a1 import mcp
+from a1 import ToolSet
 
-tools = await mcp.from_server("path/to/mcp/server")
+config = {
+    "mcpServers": {
+        "filesystem": {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path"]
+        }
+    }
+}
+
+tools = await ToolSet.from_mcp_servers(config)
 ```
 
 ## LLM

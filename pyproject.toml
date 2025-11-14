@@ -1,6 +1,6 @@
 [project]
 name = "a1-compiler"
-version = "0.1.5"
+version = "0.1.6"
 description = "An optimizing agent-to-code compiler"
 readme = "README.md"
 authors = [
@@ -24,6 +24,8 @@ dependencies = [
     "fsspec>=2024.0.0",
     "sqlalchemy>=2.0.0",
     "python-dotenv>=1.0.0",
+    "httpx>=0.27.0",
+    "pyyaml>=6.0.0",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +35,8 @@ dev = [
     "pytest-cov>=6.0.0",
     "ruff>=0.8.0",
     "mypy>=1.13.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
 ]
 examples = [
     "z3-solver>=4.13.0",
