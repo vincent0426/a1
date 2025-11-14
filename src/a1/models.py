@@ -31,25 +31,27 @@ class Message(BaseModel):
 class AttemptStrategy(BaseModel):
     """
     Base strategy for operations that may require multiple attempts.
-    
+
     Attributes:
         max_iterations: Maximum retry attempts (default: 3)
     """
+
     max_iterations: int = Field(default=3, description="Maximum retry attempts per operation")
 
 
 class ParallelStrategy(AttemptStrategy):
     """
     Strategy for parallel batch processing with rate limit handling.
-    
+
     Used for operations that process large datasets in chunks with parallel execution.
     Implements adaptive concurrency control with exponential backoff on rate limit errors.
-    
+
     Attributes:
         max_iterations: Maximum retry attempts per chunk (default: 3)
         chunk_size: Number of items per chunk (default: 2048)
         max_parallel_chunks: Maximum chunks to process concurrently (default: 16)
     """
+
     chunk_size: int = Field(default=2048, description="Number of items per chunk/batch")
     max_parallel_chunks: int = Field(default=16, description="Maximum chunks to process in parallel")
 
@@ -57,7 +59,7 @@ class ParallelStrategy(AttemptStrategy):
 class RetryStrategy(AttemptStrategy):
     """
     Retry strategy for LLM operations.
-    
+
     Controls retry behavior and parallel execution for operations that may need
     multiple attempts to succeed (e.g., LLM calls with structured output validation).
 
@@ -65,6 +67,7 @@ class RetryStrategy(AttemptStrategy):
         max_iterations: Maximum retry attempts per operation (default: 3)
         num_candidates: Number of parallel attempts to execute (default: 1)
     """
+
     num_candidates: int = Field(default=1, description="Number of parallel attempts to execute")
 
 
@@ -122,38 +125,38 @@ class Tool(BaseModel):
     is_terminal: bool = False
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    
+
     @classmethod
     def __get_pydantic_json_schema__(cls, core_schema, handler):
         """
         Custom JSON schema for the Tool class.
-        
+
         IMPORTANT: This is NOT used to get schemas for individual tools!
         Individual tool schemas come from: tool.input_schema.model_json_schema()
-        
+
         Why this is needed:
         - Tool has `execute: Callable` which cannot be serialized to JSON schema
         - When generating schemas for models that contain Tool (e.g., LLMInput with tools: list[Tool]),
           Pydantic needs to generate Tool's class schema to understand the type structure
         - Without this, Pydantic fails with: "Cannot generate JsonSchema for CallableSchema"
-        
+
         Solution:
         - Remove the `execute` field from the core schema before processing
         - Let Pydantic's handler process the rest normally (proper type checking!)
         - This preserves type validation for name, description, input_schema, output_schema, is_terminal
-        
+
         Note: input_schema/output_schema are type[BaseModel] (class objects), so their schema
         just indicates "subclass of BaseModel". Actual schemas obtained via tool.input_schema.model_json_schema().
         """
         import copy
-        
+
         # Create a copy and remove the execute field
         modified_schema = copy.deepcopy(core_schema)
-        if 'schema' in modified_schema and modified_schema['schema'].get('type') == 'model-fields':
-            fields = modified_schema['schema'].get('fields', {})
-            if 'execute' in fields:
-                del fields['execute']
-        
+        if "schema" in modified_schema and modified_schema["schema"].get("type") == "model-fields":
+            fields = modified_schema["schema"].get("fields", {})
+            if "execute" in fields:
+                del fields["execute"]
+
         # Let Pydantic process the rest with proper type checking
         return handler(modified_schema)
 
@@ -275,9 +278,15 @@ def tool(name: str | None = None, description: str | None = None, is_terminal: b
         return_type = hints.pop("return", Any)
 
         # Create input schema from parameters
+        sig = inspect.signature(func)
         input_fields = {}
-        for param_name, param_type in hints.items():
-            input_fields[param_name] = (param_type, ...)
+        for param_name, param in sig.parameters.items():
+            annotation = hints.get(param_name, Any)
+            if param.default is inspect._empty:
+                default = ...
+            else:
+                default = param.default
+            input_fields[param_name] = (annotation, default)
 
         InputModel = create_model(f"{func_name}_Input", **input_fields)
 

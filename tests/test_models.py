@@ -32,6 +32,23 @@ class TestTool:
 
         assert done.is_terminal
 
+    def test_tool_decorator_optional_arguments(self):
+        """Test @tool decorator with optional arguments."""
+
+        @tool(name="add", description="Add two numbers")
+        async def add(a: int, b: int = 0) -> int:
+            return a + b
+
+        assert add.input_schema.model_json_schema() == {
+            "properties": {
+                "a": {"title": "A", "type": "integer"},
+                "b": {"default": 0, "title": "B", "type": "integer"},
+            },
+            "required": ["a"],
+            "title": "add_Input",
+            "type": "object",
+        }
+
     @pytest.mark.asyncio
     async def test_tool_execution(self):
         """Test tool execution with validation."""
