@@ -49,6 +49,45 @@ class TestTool:
             "type": "object",
         }
 
+    @pytest.mark.parametrize(
+        "return_type,expected_result",
+        [
+            (int, {"title": "Result", "type": "integer"}),
+            (str, {"title": "Result", "type": "string"}),
+            (dict, {"additionalProperties": True, "title": "Result", "type": "object"}),
+            (None, {"title": "Result"}),
+        ],
+    )
+    def test_tool_decorator_output_schema(self, return_type, expected_result):
+        """Test @tool decorator with output schema."""
+
+        @tool(name="func", description="Test function")
+        async def func() -> return_type:
+            pass
+
+        assert func.output_schema.model_json_schema() == {
+            "properties": {
+                "result": expected_result,
+            },
+            "required": ["result"],
+            "title": "func_Output",
+            "type": "object",
+        }
+
+    def test_tool_decorator_output_schema_basemodel(self):
+        """Test @tool decorator with BaseModel return type."""
+
+        class ResultModel(BaseModel):
+            value: int
+
+        @tool(name="func", description="Test function")
+        async def func() -> ResultModel:
+            pass
+
+        # When return type is a BaseModel subclass, it's used directly as output_schema
+        assert func.output_schema == ResultModel
+        assert func.output_schema.model_json_schema()["properties"]["value"]["type"] == "integer"
+
     @pytest.mark.asyncio
     async def test_tool_execution(self):
         """Test tool execution with validation."""

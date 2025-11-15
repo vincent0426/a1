@@ -10,6 +10,7 @@ This module defines the fundamental building blocks:
 import inspect
 from collections.abc import Callable
 from datetime import datetime
+from types import NoneType
 from typing import Any, Optional, Union, get_type_hints
 from uuid import uuid4
 
@@ -291,7 +292,7 @@ def tool(name: str | None = None, description: str | None = None, is_terminal: b
         InputModel = create_model(f"{func_name}_Input", **input_fields)
 
         # Create output schema from return type
-        if return_type == Any or return_type is None:
+        if return_type in [Any, NoneType]:
             OutputModel = create_model(f"{func_name}_Output", result=(Any, ...))
         elif isinstance(return_type, type) and issubclass(return_type, BaseModel):
             OutputModel = return_type
